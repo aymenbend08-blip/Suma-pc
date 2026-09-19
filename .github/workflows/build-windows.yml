@@ -17,9 +17,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - run: npm ci
+      # No package-lock.json is committed (npm's lockfile format churns
+      # heavily on every dependency bump and isn't worth vendoring for a
+      # project this size yet) — so this installs from package.json's
+      # ranges rather than `npm ci`, which requires a lockfile to exist.
+      - run: npm install
 
       - name: Typecheck
         run: npm run typecheck
