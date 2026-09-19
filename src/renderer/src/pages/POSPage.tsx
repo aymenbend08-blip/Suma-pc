@@ -33,7 +33,7 @@ type CartLine = {
 export function POSPage() {
   const { active } = useStore();
   const { session } = useAuth();
-  const { refreshPending } = useSync();
+  const { refreshPending, isOnline } = useSync();
   const storeId = active!.id;
 
   const [search, setSearch] = useState("");
@@ -148,9 +148,21 @@ export function POSPage() {
 
   const subtotal = cart.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
   const total = Math.max(0, subtotal - discount);
+  // Only meaningful while offline: online, record_sale() is the
+  // authoritative stock check and this locally-cached figure can be
+  // stale. Offline, it's the same check createLocalSale() will run
+  // anyway — surfacing it here lets the cashier fix the cart before
+  // trying, instead of after.
+  const insufficientLines = !isOnline ? cart.filter((l) => l.quantity > l.stockQuantity) : [];
 
   async function checkout() {
     if (cart.length === 0) return;
+    if (insufficientLines.length > 0) {
+      toast.error(
+        `المخزون المحلي غير كافٍ لـ ${insufficientLines.map((l) => l.name).join("، ")} — قلّل الكمية أو انتظر الاتصال.`,
+      );
+      return;
+    }
     setCheckingOut(true);
     const { data, error } = await recordSale({
       _store_id: storeId,
@@ -269,9 +281,18 @@ export function POSPage() {
             <p className="py-8 text-center text-sm text-muted-foreground">السلة فارغة</p>
           ) : (
             <ul className="divide-y divide-border">
-              {cart.map((l) => (
+              {cart.map((l) => {
+                const insufficient = !isOnline && l.quantity > l.stockQuantity;
+                return (
                 <li key={l.productId} className="flex items-center gap-2 py-2">
-                  <span className="min-w-0 flex-1 truncate text-sm">{l.name}</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">{l.name}</span>
+                    {insufficient && (
+                      <span className="text-xs font-medium text-destructive">
+                        غير متوفر محليًا — الموجود: {l.stockQuantity}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-1">
                     <Button variant="outline" size="icon" className="size-7" onClick={() => updateQuantity(l.productId, -1)}>
                       <Minus className="size-3" aria-hidden />
@@ -288,7 +309,8 @@ export function POSPage() {
                     <Trash2 className="size-4" aria-hidden />
                   </Button>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </div>
@@ -366,9 +388,13 @@ export function POSPage() {
           />
         </div>
 
-        <Button size="lg" disabled={cart.length === 0 || checkingOut} onClick={() => void checkout()}>
+        <Button
+          size="lg"
+          disabled={cart.length === 0 || checkingOut || insufficientLines.length > 0}
+          onClick={() => void checkout()}
+        >
           {checkingOut && <Loader2 className="size-4 animate-spin" aria-hidden />}
-          إتمام البيع
+          {insufficientLines.length > 0 ? "المخزون المحلي غير كافٍ" : "إتمام البيع"}
         </Button>
 
         {lastSale && (
