@@ -74,7 +74,7 @@ function getSpeechRecognition(): any {
  * all yet. Both are clearly gated on `isOnline` rather than silently
  * failing offline.
  */
-export function POSPage() {
+export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }) {
   const { active } = useStore();
   const { session } = useAuth();
   const { refreshPending, isOnline } = useSync();
@@ -124,6 +124,13 @@ export function POSPage() {
 
   useEffect(() => {
     searchRef.current?.focus();
+  }, []);
+
+  // "إرجاع من زبون" on the home screen lands here with the return dialog
+  // already open, instead of duplicating its fetch/selection logic there.
+  useEffect(() => {
+    if (autoOpenReturn) void openReturnDialog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Live clock for the invoice-info card — real time, not a fabricated

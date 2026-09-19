@@ -5,9 +5,12 @@ import { StoreProvider, useStore } from "@/context/StoreContext";
 import { SyncProvider } from "@/context/SyncContext";
 import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
+import { HomePage, type HomeNavOptions } from "@/pages/HomePage";
 import { POSPage } from "@/pages/POSPage";
 import { CustomersPage } from "@/pages/CustomersPage";
+import { DashboardPage } from "@/pages/DashboardPage";
 import { SyncQueuePage } from "@/pages/SyncQueuePage";
+import { ComingSoonPage } from "@/pages/ComingSoonPage";
 import { Shell, type Page } from "@/components/Shell";
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -16,7 +19,13 @@ function Centered({ children }: { children: React.ReactNode }) {
 
 function AuthedApp() {
   const { loading, error, active, stores, perms, userId } = useStore();
-  const [page, setPage] = useState<Page>("pos");
+  const [page, setPage] = useState<Page>("home");
+  const [navOpts, setNavOpts] = useState<HomeNavOptions>({});
+
+  function navigate(next: Page, opts: HomeNavOptions = {}) {
+    setNavOpts(opts);
+    setPage(next);
+  }
 
   if (loading) {
     return (
@@ -43,19 +52,25 @@ function AuthedApp() {
   }
   if (!active || !userId) return null;
 
-  const effectivePage: Page = page === "pos" && !perms.canUsePos ? "customers" : page;
+  const effectivePage: Page =
+    (page === "pos" && !perms.canUsePos) ||
+    (page === "customers" && !perms.canManageCustomers) ||
+    (page === "dashboard" && !perms.isAdmin) ||
+    (page === "sync" && !perms.isAdmin)
+      ? "home"
+      : page;
 
   return (
     <SyncProvider storeId={active.id} userId={userId}>
-      <Shell page={effectivePage} onNavigate={setPage}>
-        {effectivePage === "pos" && perms.canUsePos && <POSPage />}
-        {effectivePage === "customers" && perms.canManageCustomers && <CustomersPage />}
-        {effectivePage === "sync" && perms.isAdmin && <SyncQueuePage />}
-        {!perms.canUsePos && !perms.canManageCustomers && (
-          <p className="p-6 text-center text-sm text-muted-foreground">
-            ما عندكش صلاحية استعمال نقطة البيع أو إدارة الزبائن في هذا المحل.
-          </p>
+      <Shell page={effectivePage} onNavigate={navigate}>
+        {effectivePage === "home" && <HomePage onNavigate={navigate} />}
+        {effectivePage === "pos" && perms.canUsePos && <POSPage autoOpenReturn={navOpts.autoOpenReturn} />}
+        {effectivePage === "customers" && perms.canManageCustomers && (
+          <CustomersPage debtOnly={navOpts.debtOnly} />
         )}
+        {effectivePage === "dashboard" && perms.isAdmin && <DashboardPage />}
+        {effectivePage === "sync" && perms.isAdmin && <SyncQueuePage />}
+        {effectivePage === "coming-soon" && <ComingSoonPage title={navOpts.comingSoonTitle ?? "قريبًا"} />}
       </Shell>
     </SyncProvider>
   );

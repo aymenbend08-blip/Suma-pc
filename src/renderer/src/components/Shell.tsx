@@ -1,11 +1,22 @@
 import { type ReactNode } from "react";
-import { AlertTriangle, CloudOff, Loader2, LogOut, RefreshCw, ShoppingCart, Users, Wifi } from "lucide-react";
+import {
+  AlertTriangle,
+  BarChart3,
+  CloudOff,
+  Home,
+  Loader2,
+  LogOut,
+  RefreshCw,
+  ShoppingCart,
+  Users,
+  Wifi,
+} from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 import { Button } from "@/components/ui/button";
 
-export type Page = "pos" | "customers" | "sync";
+export type Page = "home" | "pos" | "customers" | "dashboard" | "sync" | "coming-soon";
 
 export function Shell({
   page,
@@ -41,6 +52,14 @@ export function Shell({
         )}
 
         <nav className="ms-2 flex items-center gap-1">
+          <Button
+            variant={page === "home" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => onNavigate("home")}
+          >
+            <Home className="size-4" aria-hidden />
+            الرئيسية
+          </Button>
           {perms.canUsePos && (
             <Button
               variant={page === "pos" ? "secondary" : "ghost"}
@@ -59,6 +78,16 @@ export function Shell({
             >
               <Users className="size-4" aria-hidden />
               الزبائن
+            </Button>
+          )}
+          {perms.isAdmin && (
+            <Button
+              variant={page === "dashboard" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => onNavigate("dashboard")}
+            >
+              <BarChart3 className="size-4" aria-hidden />
+              الإحصائيات
             </Button>
           )}
           {perms.isAdmin && (

@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
  * an absolute balance, so it's safe regardless of what else touches this
  * customer's account at the same time. Falls back to the same local
  * outbox as POS checkout when offline. */
-export function CustomersPage() {
+export function CustomersPage({ debtOnly = false }: { debtOnly?: boolean }) {
   const { active } = useStore();
   const { refreshPending, isOnline } = useSync();
   const storeId = active!.id;
@@ -24,6 +24,7 @@ export function CustomersPage() {
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showDebtOnly, setShowDebtOnly] = useState(debtOnly);
   const [payTarget, setPayTarget] = useState<CustomerRow | null>(null);
   const [amount, setAmount] = useState("");
   const [paying, setPaying] = useState(false);
@@ -45,11 +46,13 @@ export function CustomersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeId]);
 
-  const filtered = customers.filter((c) => {
-    const term = search.trim().toLowerCase();
-    if (!term) return true;
-    return c.full_name.toLowerCase().includes(term) || c.phone.includes(term);
-  });
+  const filtered = customers
+    .filter((c) => !showDebtOnly || Number(c.credit_balance) > 0)
+    .filter((c) => {
+      const term = search.trim().toLowerCase();
+      if (!term) return true;
+      return c.full_name.toLowerCase().includes(term) || c.phone.includes(term);
+    });
 
   function openPayDialog(c: CustomerRow) {
     setPayTarget(c);
@@ -120,7 +123,14 @@ export function CustomersPage() {
   return (
     <div className="surface p-4">
       <div className="mb-3 flex items-center gap-2">
-        <h1 className="text-lg font-bold">الزبائن</h1>
+        <h1 className="text-lg font-bold">{showDebtOnly ? "تسديد ديون الزبائن" : "الزبائن"}</h1>
+        <Button
+          variant={showDebtOnly ? "default" : "outline"}
+          size="sm"
+          onClick={() => setShowDebtOnly((v) => !v)}
+        >
+          {showDebtOnly ? "عرض الكل" : "المديونين فقط"}
+        </Button>
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
