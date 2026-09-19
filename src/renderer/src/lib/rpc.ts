@@ -44,6 +44,7 @@ export type PayCustomerCreditArgs = {
   _customer_id: string;
   _store_id: string;
   _amount: number;
+  _client_request_id?: string;
 };
 
 export async function payCustomerCredit(args: PayCustomerCreditArgs) {
