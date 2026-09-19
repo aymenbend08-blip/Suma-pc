@@ -17,7 +17,6 @@ function createWindow(): void {
     title: "SUMA Desktop",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
-      sandbox: false,
     },
   });
 
