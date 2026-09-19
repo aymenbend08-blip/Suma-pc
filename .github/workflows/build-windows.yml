@@ -27,11 +27,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # These are the publishable (anon) URL/key — the same ones SUMA Web
+      # already ships inside its own public browser bundle, protected
+      # entirely by Supabase RLS, not by keeping them out of source
+      # control. Safe to commit here for the same reason; no repo secrets
+      # needed for this build to be fully functional out of the box.
       - name: Build (Vite + Electron main/preload/renderer)
         run: npm run build
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_SUPABASE_URL: https://tlpcuabifqulfdvrvmlm.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRscGN1YWJpZnF1bGZkdnJ2bWxtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMzEzNTksImV4cCI6MjEwNDkwNzM1OX0.4Q01dYuY93hko2JgtVf6YwilljzrGo_I6lvhYLXdT1Y
 
       - name: Package Windows installer
         run: npx electron-builder --win --publish never

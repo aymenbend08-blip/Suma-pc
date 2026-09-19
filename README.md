@@ -59,9 +59,11 @@ Produces an NSIS installer under `release/`.
 **Recommended**: use the included GitHub Actions workflow
 (`.github/workflows/build-windows.yml`) instead — it builds on a real
 `windows-latest` runner, which is more reliable than cross-compiling from
-another OS. Set the `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY`
-repository secrets first, then trigger the workflow (push to `main`, or
-"Run workflow" manually) and download the `suma-desktop-windows` artifact.
+another OS. It's ready to run with no setup: push to `main` or trigger
+"Run workflow" manually, then download the `suma-desktop-windows`
+artifact — a fully working installer, since the workflow already points
+at the same public Supabase project SUMA Web uses (its anon key is safe
+to keep in the workflow file — see the comment above that step).
 
 ## Project layout
 
