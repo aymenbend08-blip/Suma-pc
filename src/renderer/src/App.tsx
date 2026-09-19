@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, TriangleAlert } from "lucide-react";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { StoreProvider, useStore } from "@/context/StoreContext";
+import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
 import { POSPage } from "@/pages/POSPage";
 import { CustomersPage } from "@/pages/CustomersPage";
@@ -74,7 +75,23 @@ function Gate() {
   );
 }
 
+function ConfigErrorScreen({ message }: { message: string }) {
+  return (
+    <Centered>
+      <div className="surface max-w-sm space-y-2 p-5 text-center">
+        <TriangleAlert className="mx-auto size-8 text-warning" aria-hidden />
+        <p className="text-sm font-medium">{message}</p>
+        <p className="text-xs text-muted-foreground">
+          راجع ملف .env.example في مجلد البرنامج لمعرفة القيم المطلوبة.
+        </p>
+      </div>
+    </Centered>
+  );
+}
+
 export function App() {
+  if (supabaseConfigError) return <ConfigErrorScreen message={supabaseConfigError} />;
+
   return (
     <AuthProvider>
       <Gate />
