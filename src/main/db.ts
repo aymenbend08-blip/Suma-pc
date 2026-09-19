@@ -440,6 +440,18 @@ export type SyncQueueItem = {
  */
 export function applyLocalCreditPayment(customerId: string, amount: number): number {
   const d = getDb();
+  const customer = d.prepare("SELECT credit_balance FROM customers WHERE id = ?").get(customerId) as
+    | { credit_balance: number }
+    | undefined;
+  if (!customer) throw new Error("زبون غير معروف محليًا.");
+  // Mirrors pay_customer_credit()'s server-side rejection of an
+  // overpayment — same reasoning as createLocalSale's stock check: catch
+  // it locally instead of only discovering the rejection at sync time.
+  if (amount > Number(customer.credit_balance)) {
+    throw new Error(
+      `المبلغ (${amount}) أكبر من الدّين المعروف محليًا (${customer.credit_balance}) على هذا الزبون.`,
+    );
+  }
   d.prepare("UPDATE customers SET credit_balance = credit_balance - ? WHERE id = ?").run(amount, customerId);
   const row = d.prepare("SELECT credit_balance FROM customers WHERE id = ?").get(customerId) as
     | { credit_balance: number }

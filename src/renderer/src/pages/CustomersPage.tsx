@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
  * outbox as POS checkout when offline. */
 export function CustomersPage() {
   const { active } = useStore();
-  const { refreshPending } = useSync();
+  const { refreshPending, isOnline } = useSync();
   const storeId = active!.id;
 
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
@@ -57,11 +57,21 @@ export function CustomersPage() {
     setClientRequestId(uuid());
   }
 
+  const paymentValue = Number(amount);
+  // Only meaningful while offline: online, pay_customer_credit() is the
+  // authoritative check and this locally-cached balance can be stale.
+  const exceedsLocalBalance =
+    !isOnline && payTarget !== null && paymentValue > 0 && paymentValue > Number(payTarget.credit_balance);
+
   async function submitPayment() {
     if (!payTarget) return;
     const value = Number(amount);
     if (!(value > 0)) {
       toast.error("المبلغ لازم يكون أكبر من صفر.");
+      return;
+    }
+    if (exceedsLocalBalance) {
+      toast.error("المبلغ أكبر من الدّين المعروف محليًا على هذا الزبون — انتظر الاتصال أو قلّل المبلغ.");
       return;
     }
     setPaying(true);
@@ -165,13 +175,23 @@ export function CustomersPage() {
               onChange={(e) => setAmount(e.target.value)}
               placeholder="المبلغ المدفوع (دج)"
             />
+            {exceedsLocalBalance && (
+              <p className="mt-1.5 text-xs font-medium text-destructive">
+                المبلغ أكبر من الدّين المعروف محليًا ({formatDA(payTarget.credit_balance)}) — بدون إنترنت لا يمكن
+                تأكيد المبلغ الفعلي.
+              </p>
+            )}
             <div className="mt-3 flex gap-2">
               <Button variant="outline" className="flex-1" onClick={() => setPayTarget(null)}>
                 إلغاء
               </Button>
-              <Button className="flex-1" disabled={paying} onClick={() => void submitPayment()}>
+              <Button
+                className="flex-1"
+                disabled={paying || exceedsLocalBalance}
+                onClick={() => void submitPayment()}
+              >
                 {paying && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                تأكيد
+                {exceedsLocalBalance ? "المبلغ غير صالح محليًا" : "تأكيد"}
               </Button>
             </div>
           </div>
