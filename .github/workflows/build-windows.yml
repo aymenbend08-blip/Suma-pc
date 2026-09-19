@@ -9,6 +9,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    # Separate job/runner from `build` on purpose: `build`'s `npm install`
+    # triggers the postinstall electron-builder rebuild of better-sqlite3
+    # for Electron's ABI, which a plain Node process (vitest) can't load.
+    # --ignore-scripts here skips that rebuild, leaving better-sqlite3 at
+    # its normal Node-ABI prebuild so the tests (which run main/db.ts
+    # directly, no Electron involved) can require() it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts
+      - run: npm run test
+
   build:
     runs-on: windows-latest
     steps:
