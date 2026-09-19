@@ -505,10 +505,10 @@ export function POSPage() {
         void openReturnDialog();
       } else if (e.key === "F4") {
         e.preventDefault();
-        setPaymentMethod("cash");
+        if (!checkingOut) void checkout();
       } else if (e.key === "F5") {
         e.preventDefault();
-        setPaymentMethod("card");
+        void printReceipt();
       } else if (e.key === "F6") {
         e.preventDefault();
         setShowCustomItem(true);
@@ -530,7 +530,7 @@ export function POSPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedKey, cart, heldSales, discountInput, discountMode, paymentMethod, customer, isOnline]);
+  }, [selectedKey, cart, heldSales, discountInput, discountMode, paymentMethod, customer, isOnline, checkingOut]);
 
   const dateLabel = useMemo(
     () => now.toLocaleString("ar-DZ", { dateStyle: "medium", timeStyle: "medium" }),
@@ -758,7 +758,7 @@ export function POSPage() {
                 </span>
               )}
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => void printReceipt()} title="طباعة آخر فاتورة">
+            <Button variant="ghost" size="icon" onClick={() => void printReceipt()} title="طباعة آخر فاتورة [F5]">
               <Printer className="size-4" aria-hidden />
             </Button>
           </div>
@@ -907,7 +907,7 @@ export function POSPage() {
                       : ""
                   }
                 >
-                  {m === "cash" ? "نقدًا (F4)" : m === "card" ? "بطاقة (F5)" : "كريدي"}
+                  {m === "cash" ? "نقدًا" : m === "card" ? "بطاقة" : "كريدي"}
                 </Button>
               ))}
             </div>
@@ -925,7 +925,7 @@ export function POSPage() {
             onClick={() => void checkout()}
           >
             {checkingOut && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            إتمام البيع
+            إتمام البيع [F4]
           </Button>
 
           {lastSale && (
@@ -933,7 +933,7 @@ export function POSPage() {
               <p>آخر بيع: {formatDA(lastSale.total_amount)}</p>
               <Button variant="link" size="sm" className="h-auto p-0" onClick={() => void printReceipt()}>
                 <Printer className="size-3.5" aria-hidden />
-                طباعة الفاتورة
+                طباعة الفاتورة [F5]
               </Button>
             </div>
           )}
