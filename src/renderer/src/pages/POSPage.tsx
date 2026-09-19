@@ -13,6 +13,7 @@ import {
   ListChecks,
   RotateCcw,
   PackagePlus,
+  Mic,
 } from "lucide-react";
 import { recordSale, refundSale } from "@/lib/rpc";
 import { supabase } from "@/lib/supabase";
@@ -50,6 +51,13 @@ type HeldSale = {
 };
 
 const HELD_KEY_PREFIX = "suma-pos-held-sales:";
+
+// Minimal typing for the Web Speech API (not in TS's default DOM lib) —
+// same helper SUMA Web's pos.tsx uses for the exact same feature.
+function getSpeechRecognition(): any {
+  if (typeof window === "undefined") return null;
+  return (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
+}
 
 /**
  * Checkout tries the exact same record_sale() RPC as SUMA Web's
@@ -90,6 +98,8 @@ export function POSPage() {
   const [customerResults, setCustomerResults] = useState<CustomerRow[]>([]);
   const [customer, setCustomer] = useState<CustomerRow | null>(null);
   const [showCustomerPicker, setShowCustomerPicker] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [voiceLang, setVoiceLang] = useState<"ar-SA" | "fr-FR">("ar-SA");
 
   const [clientRequestId, setClientRequestId] = useState(() => uuid());
   const [checkingOut, setCheckingOut] = useState(false);
@@ -265,6 +275,29 @@ export function POSPage() {
     setCustomQty("1");
     setShowCustomItem(false);
     searchRef.current?.focus();
+  }
+
+  function startVoiceSearch() {
+    const SpeechRecognition = getSpeechRecognition();
+    if (!SpeechRecognition) {
+      toast.error("المتصفح ما يدعمش التعرف على الصوت.");
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = voiceLang;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => setListening(true);
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => {
+      setListening(false);
+      toast.error("ما قدرناش نسمعو صح، جرب تكتب الاسم.");
+    };
+    recognition.onresult = (event: any) => {
+      const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+      if (transcript) setCustomerQuery(transcript);
+    };
+    recognition.start();
   }
 
   const subtotal = cart.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
@@ -476,6 +509,9 @@ export function POSPage() {
       } else if (e.key === "F5") {
         e.preventDefault();
         setPaymentMethod("card");
+      } else if (e.key === "F6") {
+        e.preventDefault();
+        setShowCustomItem(true);
       } else if (e.key === "F8") {
         e.preventDefault();
         holdSale();
@@ -775,7 +811,7 @@ export function POSPage() {
 
           <Button variant="secondary" size="sm" onClick={() => setShowCustomItem(true)}>
             <PackagePlus className="size-3.5" aria-hidden />
-            صنف بدون باركود
+            صنف بدون باركود [F6]
           </Button>
 
           <div className="surface p-3">
@@ -799,11 +835,39 @@ export function POSPage() {
             </Button>
             {showCustomerPicker && !customer && (
               <div className="mt-2 space-y-2">
-                <Input
-                  value={customerQuery}
-                  onChange={(e) => setCustomerQuery(e.target.value)}
-                  placeholder="اسم أو هاتف الزبون..."
-                />
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    value={customerQuery}
+                    onChange={(e) => setCustomerQuery(e.target.value)}
+                    placeholder="اسم أو هاتف الزبون..."
+                    className="flex-1"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-9 shrink-0 px-2 text-xs"
+                    onClick={() => setVoiceLang((l) => (l === "ar-SA" ? "fr-FR" : "ar-SA"))}
+                    title="بدّل لغة البحث الصوتي"
+                  >
+                    {voiceLang === "ar-SA" ? "عربي" : "FR"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant={listening ? "default" : "outline"}
+                    className="size-9 shrink-0"
+                    onClick={startVoiceSearch}
+                    title="ابحث بالصوت"
+                  >
+                    <Mic className="size-4" aria-hidden />
+                  </Button>
+                </div>
+                {listening && (
+                  <p className="text-xs text-muted-foreground">
+                    جاري الاستماع بال{voiceLang === "ar-SA" ? "عربية" : "فرنسية"}...
+                  </p>
+                )}
                 {customerResults.length > 0 && (
                   <ul className="max-h-40 divide-y divide-border overflow-y-auto rounded-md border border-border">
                     {customerResults.map((c) => (

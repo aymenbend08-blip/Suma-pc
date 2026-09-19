@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, session, shell } from "electron";
 import { join } from "path";
 import { initDb } from "./db";
 import { registerDbIpc } from "./ipc-db";
@@ -49,6 +49,14 @@ function createWindow(): void {
 
 void app.whenReady().then(() => {
   app.setAppUserModelId("com.suma.desktop");
+
+  // Electron denies every permission request by default unless a handler
+  // says otherwise. The customer voice-search feature needs the mic
+  // ("media") — everything else (camera, geolocation, notifications, ...)
+  // stays denied, least-privilege, same posture as the sandbox hardening.
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === "media");
+  });
 
   initDb(app.getPath("userData"));
   registerDbIpc();
