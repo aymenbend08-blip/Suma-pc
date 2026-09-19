@@ -1,7 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Minus, Plus, Printer, ScanBarcode, Trash2, UserRound, X } from "lucide-react";
-import { recordSale } from "@/lib/rpc";
+import {
+  Loader2,
+  Minus,
+  Plus,
+  Printer,
+  ScanBarcode,
+  Trash2,
+  UserRound,
+  X,
+  Clock,
+  ListChecks,
+  RotateCcw,
+  PackagePlus,
+} from "lucide-react";
+import { recordSale, refundSale } from "@/lib/rpc";
+import { supabase } from "@/lib/supabase";
 import { localDb } from "@/lib/localdb";
 import { isNetworkError } from "@/lib/net";
 import { useStore } from "@/context/StoreContext";
@@ -9,17 +23,33 @@ import { useAuth } from "@/context/AuthContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
 import { uuid } from "@/lib/uuid";
-import type { CustomerRow, ProductRow, SaleRow } from "@/lib/database.types";
+import type { CustomerRow, ProductRow, SaleItemRow, SaleRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import sumaLogo from "@/assets/suma-logo.png";
 
 type CartLine = {
-  productId: string;
+  key: string;
+  productId: string | null;
   name: string;
   unitPrice: number;
   quantity: number;
   stockQuantity: number;
+  isCustom: boolean;
 };
+
+type HeldSale = {
+  id: string;
+  createdAt: string;
+  cart: CartLine[];
+  discount: number;
+  discountMode: "amount" | "percent";
+  paymentMethod: "cash" | "card" | "credit";
+  customer: CustomerRow | null;
+  label: string;
+};
+
+const HELD_KEY_PREFIX = "suma-pos-held-sales:";
 
 /**
  * Checkout tries the exact same record_sale() RPC as SUMA Web's
@@ -29,20 +59,31 @@ type CartLine = {
  * fall back to writing the sale into the local SQLite outbox for the sync
  * engine to replay against that exact same RPC once back online — the
  * online path itself is never weakened to make offline simpler.
+ *
+ * Custom (no-barcode) items and returns/refunds stay online-only for now —
+ * the local SQLite outbox (main/db.ts createLocalSale) only knows how to
+ * replay a catalog-item sale, and refund_sale() has no offline mirror at
+ * all yet. Both are clearly gated on `isOnline` rather than silently
+ * failing offline.
  */
 export function POSPage() {
   const { active } = useStore();
   const { session } = useAuth();
   const { refreshPending, isOnline } = useSync();
   const storeId = active!.id;
+  const heldKey = HELD_KEY_PREFIX + storeId;
 
   const [search, setSearch] = useState("");
+  const [searchMode, setSearchMode] = useState<"barcode" | "name">("barcode");
   const [results, setResults] = useState<ProductRow[]>([]);
   const [searching, setSearching] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const discountRef = useRef<HTMLInputElement>(null);
 
   const [cart, setCart] = useState<CartLine[]>([]);
-  const [discount, setDiscount] = useState(0);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [discountInput, setDiscountInput] = useState(0);
+  const [discountMode, setDiscountMode] = useState<"amount" | "percent">("amount");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "card" | "credit">("cash");
 
   const [customerQuery, setCustomerQuery] = useState("");
@@ -54,9 +95,53 @@ export function POSPage() {
   const [checkingOut, setCheckingOut] = useState(false);
   const [lastSale, setLastSale] = useState<SaleRow | null>(null);
 
+  const [now, setNow] = useState(() => new Date());
+  const [showHeld, setShowHeld] = useState(false);
+  const [heldSales, setHeldSales] = useState<HeldSale[]>([]);
+
+  const [showCustomItem, setShowCustomItem] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customPrice, setCustomPrice] = useState("");
+  const [customQty, setCustomQty] = useState("1");
+
+  const [showReturn, setShowReturn] = useState(false);
+  const [returnLoading, setReturnLoading] = useState(false);
+  const [recentSales, setRecentSales] = useState<SaleRow[]>([]);
+  const [returnSale, setReturnSale] = useState<SaleRow | null>(null);
+  const [returnItems, setReturnItems] = useState<SaleItemRow[]>([]);
+  const [returnQty, setReturnQty] = useState<Record<string, number>>({});
+  const [returnSubmitting, setReturnSubmitting] = useState(false);
+
   useEffect(() => {
     searchRef.current?.focus();
   }, []);
+
+  // Live clock for the invoice-info card — real time, not a fabricated
+  // sequential invoice number (Desktop has no pre-allocated numbering
+  // scheme the way the reference software does).
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(heldKey);
+      setHeldSales(raw ? (JSON.parse(raw) as HeldSale[]) : []);
+    } catch {
+      setHeldSales([]);
+    }
+  }, [heldKey]);
+
+  function persistHeld(next: HeldSale[]) {
+    setHeldSales(next);
+    try {
+      localStorage.setItem(heldKey, JSON.stringify(next));
+    } catch {
+      // best-effort only — losing a held-sale draft is recoverable (cashier
+      // just re-enters it), never worth surfacing an error mid-sale for.
+    }
+  }
 
   // Search always reads the local SQLite mirror — never a live Supabase
   // query — so it's equally fast and equally functional online or
@@ -72,13 +157,15 @@ export function POSPage() {
     let cancelled = false;
     void localDb.searchProducts(storeId, term).then((rows) => {
       if (cancelled) return;
-      setResults(rows);
+      const filtered =
+        searchMode === "barcode" ? rows.filter((p) => p.barcode?.includes(term)) : rows;
+      setResults(filtered);
       setSearching(false);
     });
     return () => {
       cancelled = true;
     };
-  }, [search, storeId]);
+  }, [search, storeId, searchMode]);
 
   useEffect(() => {
     const term = customerQuery.trim();
@@ -106,11 +193,13 @@ export function POSPage() {
       return [
         ...lines,
         {
+          key: uuid(),
           productId: p.id,
           name: p.name,
           unitPrice: Number(p.selling_price),
           quantity: 1,
           stockQuantity: Number(p.stock_quantity),
+          isCustom: false,
         },
       ];
     });
@@ -134,32 +223,79 @@ export function POSPage() {
     toast.error("ما لقيناش منتج بهذا الباركود أو الاسم.");
   }
 
-  function updateQuantity(productId: string, delta: number) {
+  function updateQuantity(key: string, delta: number) {
     setCart((lines) =>
       lines
-        .map((l) => (l.productId === productId ? { ...l, quantity: l.quantity + delta } : l))
+        .map((l) => (l.key === key ? { ...l, quantity: l.quantity + delta } : l))
         .filter((l) => l.quantity > 0),
     );
   }
 
-  function removeLine(productId: string) {
-    setCart((lines) => lines.filter((l) => l.productId !== productId));
+  function removeLine(key: string) {
+    setCart((lines) => lines.filter((l) => l.key !== key));
+    setSelectedKey((k) => (k === key ? null : k));
+  }
+
+  function addCustomItem() {
+    const name = customName.trim();
+    const price = Number(customPrice);
+    const qty = Number(customQty) || 1;
+    if (!name) {
+      toast.error("لازم اسم للصنف.");
+      return;
+    }
+    if (!(price >= 0)) {
+      toast.error("سعر غير صالح.");
+      return;
+    }
+    setCart((lines) => [
+      ...lines,
+      {
+        key: uuid(),
+        productId: null,
+        name,
+        unitPrice: price,
+        quantity: qty,
+        stockQuantity: 0,
+        isCustom: true,
+      },
+    ]);
+    setCustomName("");
+    setCustomPrice("");
+    setCustomQty("1");
+    setShowCustomItem(false);
+    searchRef.current?.focus();
   }
 
   const subtotal = cart.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+  const discount =
+    discountMode === "percent"
+      ? Math.min(subtotal, (subtotal * (discountInput || 0)) / 100)
+      : Math.min(subtotal, discountInput || 0);
   const total = Math.max(0, subtotal - discount);
+  const itemCount = cart.reduce((sum, l) => sum + l.quantity, 0);
+  const hasCustomItem = cart.some((l) => l.isCustom);
   // Informational only — overselling is allowed on purpose (matches
   // record_sale()'s 20260919200000 migration), so this never blocks
   // checkout. Only meaningful while offline: online, the server is the
   // authoritative source and this locally-cached figure can be stale.
-  const insufficientLines = !isOnline ? cart.filter((l) => l.quantity > l.stockQuantity) : [];
+  const insufficientLines = !isOnline ? cart.filter((l) => !l.isCustom && l.quantity > l.stockQuantity) : [];
+  const blockedOffline = !isOnline && hasCustomItem;
 
   async function checkout() {
     if (cart.length === 0) return;
+    if (blockedOffline) {
+      toast.error("السلة فيها صنف بدون باركود — يحتاج اتصال بالإنترنت لإتمام البيع.");
+      return;
+    }
     setCheckingOut(true);
     const { data, error } = await recordSale({
       _store_id: storeId,
-      _items: cart.map((l) => ({ product_id: l.productId, quantity: l.quantity })),
+      _items: cart.map((l) =>
+        l.isCustom
+          ? { name: l.name, unit_price: l.unitPrice, quantity: l.quantity }
+          : { product_id: l.productId as string, quantity: l.quantity },
+      ),
       _discount: discount,
       _payment_method: paymentMethod,
       ...(customer ? { _customer_id: customer.id } : {}),
@@ -192,7 +328,7 @@ export function POSPage() {
         storeId,
         cashierId: session!.user.id,
         cashierName: session!.user.email ?? null,
-        items: cart.map((l) => ({ productId: l.productId, quantity: l.quantity })),
+        items: cart.map((l) => ({ productId: l.productId as string, quantity: l.quantity })),
         discount,
         paymentMethod,
         customerId: customer?.id ?? null,
@@ -210,7 +346,9 @@ export function POSPage() {
 
   function resetCartAfterSale() {
     setCart([]);
-    setDiscount(0);
+    setSelectedKey(null);
+    setDiscountInput(0);
+    setDiscountMode("amount");
     setCustomer(null);
     setPaymentMethod("cash");
     setClientRequestId(uuid());
@@ -226,127 +364,391 @@ export function POSPage() {
     }
   }
 
+  function holdSale() {
+    if (cart.length === 0) {
+      toast.error("السلة فارغة — لا يوجد ما يُعلَّق.");
+      return;
+    }
+    const held: HeldSale = {
+      id: uuid(),
+      createdAt: new Date().toISOString(),
+      cart,
+      discount: discountInput,
+      discountMode,
+      paymentMethod,
+      customer,
+      label: customer ? customer.full_name : `${itemCount} صنف`,
+    };
+    persistHeld([held, ...heldSales]);
+    resetCartAfterSale();
+    toast.success("تم تعليق الفاتورة — تقدر تسترجعها من قائمة المعلّقة.");
+  }
+
+  function restoreHeld(h: HeldSale) {
+    if (cart.length > 0) {
+      toast.error("فرّغ السلة الحالية أو علّقها أولًا قبل استرجاع فاتورة معلّقة.");
+      return;
+    }
+    setCart(h.cart);
+    setDiscountInput(h.discount);
+    setDiscountMode(h.discountMode);
+    setPaymentMethod(h.paymentMethod);
+    setCustomer(h.customer);
+    persistHeld(heldSales.filter((x) => x.id !== h.id));
+    setShowHeld(false);
+    toast.success("تم استرجاع الفاتورة المعلّقة.");
+  }
+
+  function discardHeld(id: string) {
+    persistHeld(heldSales.filter((x) => x.id !== id));
+  }
+
+  async function openReturnDialog() {
+    setShowReturn(true);
+    setReturnSale(null);
+    setReturnItems([]);
+    setReturnQty({});
+    if (!isOnline) return;
+    setReturnLoading(true);
+    const { data, error } = await supabase
+      .from("sales")
+      .select("*")
+      .eq("store_id", storeId)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    setReturnLoading(false);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    setRecentSales(data ?? []);
+  }
+
+  async function selectReturnSale(s: SaleRow) {
+    setReturnSale(s);
+    setReturnLoading(true);
+    const { data, error } = await supabase.from("sale_items").select("*").eq("sale_id", s.id);
+    setReturnLoading(false);
+    if (error) {
+      toast.error(error.message);
+      setReturnSale(null);
+      return;
+    }
+    const items = data ?? [];
+    setReturnItems(items);
+    const initial: Record<string, number> = {};
+    for (const item of items) initial[item.id] = 0;
+    setReturnQty(initial);
+  }
+
+  async function submitReturn() {
+    if (!returnSale) return;
+    const items = Object.entries(returnQty)
+      .filter(([, qty]) => qty > 0)
+      .map(([sale_item_id, quantity]) => ({ sale_item_id, quantity }));
+    if (items.length === 0) {
+      toast.error("حدّد كمية الإرجاع لصنف واحد على الأقل.");
+      return;
+    }
+    setReturnSubmitting(true);
+    const { error } = await refundSale({ _sale_id: returnSale.id, _store_id: storeId, _items: items });
+    setReturnSubmitting(false);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    toast.success("تم تسجيل الإرجاع بنجاح.");
+    setShowReturn(false);
+    setReturnSale(null);
+  }
+
+  // ---- Keyboard shortcuts (mirrors the physical F-key layout cashiers
+  // already use on the reference register software) ----------------------
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const inField = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (e.key === "F3") {
+        e.preventDefault();
+        void openReturnDialog();
+      } else if (e.key === "F4") {
+        e.preventDefault();
+        setPaymentMethod("cash");
+      } else if (e.key === "F5") {
+        e.preventDefault();
+        setPaymentMethod("card");
+      } else if (e.key === "F8") {
+        e.preventDefault();
+        holdSale();
+      } else if (e.key === "F9") {
+        e.preventDefault();
+        discountRef.current?.focus();
+      } else if (e.key === "F10") {
+        e.preventDefault();
+        setSearchMode("barcode");
+        searchRef.current?.focus();
+      } else if (e.key === "Delete" && !inField && selectedKey) {
+        e.preventDefault();
+        removeLine(selectedKey);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKey, cart, heldSales, discountInput, discountMode, paymentMethod, customer, isOnline]);
+
+  const dateLabel = useMemo(
+    () => now.toLocaleString("ar-DZ", { dateStyle: "medium", timeStyle: "medium" }),
+    [now],
+  );
+
   return (
-    <div className="grid gap-3 md:grid-cols-[1fr_360px]">
-      <section className="space-y-3">
-        <div className="surface p-3">
-          <div className="flex items-center gap-2">
-            <ScanBarcode className="size-5 text-muted-foreground" aria-hidden />
-            <Input
-              ref={searchRef}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void handleSearchEnter();
-                }
-              }}
-              placeholder="امسح الباركود أو اكتب اسم المنتج..."
-              className="flex-1"
-              autoFocus
-            />
-            {searching && <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />}
+    <div className="space-y-3">
+      {/* ---- Header block: totals (right, ~70%) + store/invoice card (left, ~30%) ---- */}
+      <div className="grid gap-3 lg:grid-cols-[7fr_3fr]">
+        <div className="rounded-2xl bg-[var(--foreground)] p-4 text-white">
+          <div className="text-xs text-white/60">المجموع الكلي</div>
+          <div className="text-5xl font-black num text-[var(--accent)]" dir="ltr">
+            {total.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
-          {results.length > 0 && (
-            <ul className="mt-2 max-h-64 divide-y divide-border overflow-y-auto rounded-md border border-border">
-              {results.map((p) => (
-                <li key={p.id}>
-                  <button
-                    type="button"
-                    onClick={() => addToCart(p)}
-                    className="flex w-full items-center justify-between gap-2 px-3 py-2 text-start text-sm hover:bg-accent/40"
-                  >
-                    <span className="truncate">{p.name}</span>
-                    <span className="shrink-0 text-muted-foreground num">
-                      {formatDA(p.selling_price)} · مخزون {p.stock_quantity}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="surface flex-1 p-3">
-          <h2 className="mb-2 text-sm font-bold">السلة</h2>
-          {cart.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">السلة فارغة</p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {cart.map((l) => {
-                const insufficient = !isOnline && l.quantity > l.stockQuantity;
-                return (
-                <li key={l.productId} className="flex items-center gap-2 py-2">
-                  <div className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">{l.name}</span>
-                    {insufficient && (
-                      <span className="text-xs font-medium text-destructive">
-                        غير متوفر محليًا — الموجود: {l.stockQuantity}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="outline" size="icon" className="size-7" onClick={() => updateQuantity(l.productId, -1)}>
-                      <Minus className="size-3" aria-hidden />
-                    </Button>
-                    <span className="w-8 text-center text-sm num">{l.quantity}</span>
-                    <Button variant="outline" size="icon" className="size-7" onClick={() => updateQuantity(l.productId, 1)}>
-                      <Plus className="size-3" aria-hidden />
-                    </Button>
-                  </div>
-                  <span className="w-24 text-end text-sm font-medium num">
-                    {formatDA(l.unitPrice * l.quantity)}
-                  </span>
-                  <Button variant="ghost" size="icon" className="size-7 text-destructive" onClick={() => removeLine(l.productId)}>
-                    <Trash2 className="size-4" aria-hidden />
-                  </Button>
-                </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </section>
-
-      <aside className="surface flex h-fit flex-col gap-3 p-4">
-        <div className="text-3xl font-black num">{formatDA(total)}</div>
-
-        <div>
-          <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setShowCustomerPicker((v) => !v)}>
-            <UserRound className="size-4" aria-hidden />
-            {customer ? customer.full_name : "بدون زبون (اختياري)"}
-            {customer && (
-              <X
-                className="ms-auto size-4"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setCustomer(null);
-                }}
+          <div className="mt-3 flex items-center gap-4 border-t border-white/10 pt-2 text-xs">
+            <span className="text-white/60">
+              خصم (F9)
+              <input
+                ref={discountRef}
+                type="number"
+                min={0}
+                value={discountInput || ""}
+                onChange={(e) => setDiscountInput(Number(e.target.value) || 0)}
+                className="ms-2 w-20 rounded bg-white/10 px-1.5 py-0.5 text-white num outline-none"
+                dir="ltr"
               />
-            )}
+            </span>
+            <div className="flex overflow-hidden rounded border border-white/20 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setDiscountMode("amount")}
+                className={`px-2 py-0.5 ${discountMode === "amount" ? "bg-[var(--accent)] text-[var(--accent-foreground)]" : "text-white/70"}`}
+              >
+                دج
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiscountMode("percent")}
+                className={`px-2 py-0.5 ${discountMode === "percent" ? "bg-[var(--accent)] text-[var(--accent-foreground)]" : "text-white/70"}`}
+              >
+                %
+              </button>
+            </div>
+            <span className="ms-auto text-white/60">
+              المجموع الصافي <span className="num font-bold text-white">{formatDA(total)}</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="surface flex flex-col items-center gap-1 p-3 text-center">
+          <div className="w-full text-[11px] text-muted-foreground num" dir="ltr">
+            {dateLabel}
+          </div>
+          <div className="text-lg font-black text-[var(--destructive)]">{active?.store_name}</div>
+          <p className="text-xs text-muted-foreground">نرحب بزبائننا الكرام</p>
+          <div className="flex w-full items-center justify-center gap-3 text-[11px] text-muted-foreground">
+            <span>
+              عدد الأصناف: <span className="num font-medium text-foreground">{cart.length}</span>
+            </span>
+            <span>
+              الكمية: <span className="num font-medium text-foreground">{itemCount}</span>
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-1 w-full"
+            onClick={() => void openReturnDialog()}
+          >
+            <RotateCcw className="size-3.5" aria-hidden />
+            بيع / إرجاع [F3]
           </Button>
-          {showCustomerPicker && !customer && (
-            <div className="mt-2 space-y-2">
+        </div>
+      </div>
+
+      {/* ---- Main working area: search + table (right) / control panel (left) ---- */}
+      <div className="grid gap-3 lg:grid-cols-[7fr_3fr]">
+        <section className="space-y-3">
+          <div className="surface p-3">
+            <div className="flex items-center gap-2">
+              <ScanBarcode className="size-5 text-muted-foreground" aria-hidden />
               <Input
-                value={customerQuery}
-                onChange={(e) => setCustomerQuery(e.target.value)}
-                placeholder="اسم أو هاتف الزبون..."
+                ref={searchRef}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void handleSearchEnter();
+                  }
+                }}
+                placeholder="امسح الباركود أو اكتب اسم المنتج..."
+                className="flex-1"
+                autoFocus
               />
-              {customerResults.length > 0 && (
-                <ul className="max-h-40 divide-y divide-border overflow-y-auto rounded-md border border-border">
-                  {customerResults.map((c) => (
-                    <li key={c.id}>
+              {searching && <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />}
+            </div>
+            <div className="mt-2 flex items-center gap-4 text-xs">
+              <label className="flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={searchMode === "barcode"}
+                  onChange={() => setSearchMode("barcode")}
+                />
+                باركود (F10)
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={searchMode === "name"}
+                  onChange={() => setSearchMode("name")}
+                />
+                الاسم
+              </label>
+            </div>
+            {results.length > 0 && (
+              <ul className="mt-2 max-h-64 divide-y divide-border overflow-y-auto rounded-md border border-border">
+                {results.map((p) => (
+                  <li key={p.id}>
+                    <button
+                      type="button"
+                      onClick={() => addToCart(p)}
+                      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-start text-sm hover:bg-accent/40"
+                    >
+                      <span className="truncate">{p.name}</span>
+                      <span className="shrink-0 text-muted-foreground num">
+                        {formatDA(p.selling_price)} · مخزون {p.stock_quantity}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="surface overflow-hidden p-0">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-[var(--primary)] text-[var(--primary-foreground)]">
+                  <th className="px-3 py-2 text-start font-bold">الصنف</th>
+                  <th className="w-20 px-2 py-2 text-center font-bold">الكمية</th>
+                  <th className="w-24 px-2 py-2 text-center font-bold">السعر</th>
+                  <th className="w-28 px-2 py-2 text-center font-bold">المجموع</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cart.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-sm text-muted-foreground">
+                      السلة فارغة
+                    </td>
+                  </tr>
+                ) : (
+                  cart.map((l, i) => {
+                    const insufficient = !l.isCustom && !isOnline && l.quantity > l.stockQuantity;
+                    return (
+                      <tr
+                        key={l.key}
+                        onClick={() => setSelectedKey(l.key)}
+                        className={`cursor-pointer border-b border-border last:border-0 ${
+                          selectedKey === l.key ? "bg-[var(--accent)]/20" : i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"
+                        }`}
+                      >
+                        <td className="px-3 py-1.5">
+                          <span className="block truncate">
+                            {l.name}
+                            {l.isCustom && (
+                              <span className="ms-1 text-[10px] text-muted-foreground">(بدون باركود)</span>
+                            )}
+                          </span>
+                          {insufficient && (
+                            <span className="text-xs font-medium text-destructive">
+                              غير متوفر محليًا — الموجود: {l.stockQuantity}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex items-center justify-center gap-1">
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="size-6"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                updateQuantity(l.key, -1);
+                              }}
+                            >
+                              <Minus className="size-3" aria-hidden />
+                            </Button>
+                            <span className="w-6 text-center num">{l.quantity}</span>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="size-6"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                updateQuantity(l.key, 1);
+                              }}
+                            >
+                              <Plus className="size-3" aria-hidden />
+                            </Button>
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-center num">{formatDA(l.unitPrice)}</td>
+                        <td className="px-2 py-1.5 text-center num font-medium">
+                          {formatDA(l.unitPrice * l.quantity)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside className="flex h-fit flex-col gap-3">
+          <div className="surface flex items-center justify-around p-1.5">
+            <Button variant="ghost" size="icon" onClick={() => setShowHeld((v) => !v)} title="الفواتير المعلّقة">
+              <ListChecks className="size-4" aria-hidden />
+              {heldSales.length > 0 && (
+                <span className="absolute -translate-y-3 translate-x-3 rounded-full bg-[var(--destructive)] px-1 text-[9px] text-white num">
+                  {heldSales.length}
+                </span>
+              )}
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => void printReceipt()} title="طباعة آخر فاتورة">
+              <Printer className="size-4" aria-hidden />
+            </Button>
+          </div>
+
+          {showHeld && (
+            <div className="surface p-2">
+              <h3 className="mb-1 px-1 text-xs font-bold text-muted-foreground">الفواتير المعلّقة</h3>
+              {heldSales.length === 0 ? (
+                <p className="px-1 py-2 text-xs text-muted-foreground">لا توجد فواتير معلّقة</p>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {heldSales.map((h) => (
+                    <li key={h.id} className="flex items-center gap-2 py-1.5 text-xs">
                       <button
                         type="button"
-                        className="w-full px-3 py-1.5 text-start text-sm hover:bg-accent/40"
-                        onClick={() => {
-                          setCustomer(c);
-                          setShowCustomerPicker(false);
-                          setCustomerQuery("");
-                        }}
+                        className="flex-1 text-start hover:text-primary"
+                        onClick={() => restoreHeld(h)}
                       >
-                        {c.full_name} — {c.phone}
+                        {h.label} — {formatDA(h.cart.reduce((s, l) => s + l.unitPrice * l.quantity, 0))}
+                      </button>
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => discardHeld(h.id)}
+                      >
+                        <X className="size-3.5" aria-hidden />
                       </button>
                     </li>
                   ))}
@@ -354,48 +756,262 @@ export function POSPage() {
               )}
             </div>
           )}
-        </div>
 
-        <div className="grid grid-cols-3 gap-1">
-          {(["cash", "card", "credit"] as const).map((m) => (
+          <div className="grid grid-cols-2 gap-2">
             <Button
-              key={m}
-              type="button"
-              variant={paymentMethod === m ? "default" : "outline"}
+              variant="destructive"
               size="sm"
-              disabled={m === "credit" && !customer}
-              onClick={() => setPaymentMethod(m)}
+              disabled={!selectedKey}
+              onClick={() => selectedKey && removeLine(selectedKey)}
             >
-              {m === "cash" ? "نقدًا" : m === "card" ? "بطاقة" : "كريدي"}
+              <Trash2 className="size-3.5" aria-hidden />
+              حذف السطر
             </Button>
-          ))}
-        </div>
-
-        <div>
-          <label className="text-xs text-muted-foreground">تخفيض (دج)</label>
-          <Input
-            type="number"
-            min={0}
-            value={discount || ""}
-            onChange={(e) => setDiscount(Number(e.target.value) || 0)}
-          />
-        </div>
-
-        <Button size="lg" disabled={cart.length === 0 || checkingOut} onClick={() => void checkout()}>
-          {checkingOut && <Loader2 className="size-4 animate-spin" aria-hidden />}
-          إتمام البيع
-        </Button>
-
-        {lastSale && (
-          <div className="rounded-md border border-border p-2 text-xs text-muted-foreground">
-            <p>آخر بيع: {formatDA(lastSale.total_amount)}</p>
-            <Button variant="link" size="sm" className="h-auto p-0" onClick={() => void printReceipt()}>
-              <Printer className="size-3.5" aria-hidden />
-              طباعة الفاتورة
+            <Button variant="destructive" size="sm" onClick={holdSale}>
+              <Clock className="size-3.5" aria-hidden />
+              تعليق [F8]
             </Button>
           </div>
-        )}
-      </aside>
+
+          <Button variant="secondary" size="sm" onClick={() => setShowCustomItem(true)}>
+            <PackagePlus className="size-3.5" aria-hidden />
+            صنف بدون باركود
+          </Button>
+
+          <div className="surface p-3">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-start"
+              onClick={() => setShowCustomerPicker((v) => !v)}
+            >
+              <UserRound className="size-4" aria-hidden />
+              {customer ? customer.full_name : "بدون زبون (اختياري)"}
+              {customer && (
+                <X
+                  className="ms-auto size-4"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCustomer(null);
+                  }}
+                />
+              )}
+            </Button>
+            {showCustomerPicker && !customer && (
+              <div className="mt-2 space-y-2">
+                <Input
+                  value={customerQuery}
+                  onChange={(e) => setCustomerQuery(e.target.value)}
+                  placeholder="اسم أو هاتف الزبون..."
+                />
+                {customerResults.length > 0 && (
+                  <ul className="max-h-40 divide-y divide-border overflow-y-auto rounded-md border border-border">
+                    {customerResults.map((c) => (
+                      <li key={c.id}>
+                        <button
+                          type="button"
+                          className="w-full px-3 py-1.5 text-start text-sm hover:bg-accent/40"
+                          onClick={() => {
+                            setCustomer(c);
+                            setShowCustomerPicker(false);
+                            setCustomerQuery("");
+                          }}
+                        >
+                          {c.full_name} — {c.phone}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            <div className="mt-2 grid grid-cols-3 gap-1">
+              {(["cash", "card", "credit"] as const).map((m) => (
+                <Button
+                  key={m}
+                  type="button"
+                  variant={paymentMethod === m ? "default" : "outline"}
+                  size="sm"
+                  disabled={m === "credit" && !customer}
+                  onClick={() => setPaymentMethod(m)}
+                  className={
+                    paymentMethod === m
+                      ? m === "cash"
+                        ? "bg-[var(--success)] text-[var(--success-foreground)] hover:bg-[var(--success)]/90"
+                        : ""
+                      : ""
+                  }
+                >
+                  {m === "cash" ? "نقدًا (F4)" : m === "card" ? "بطاقة (F5)" : "كريدي"}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {blockedOffline && (
+            <p className="text-xs font-medium text-destructive">
+              السلة فيها صنف بدون باركود — يحتاج اتصال بالإنترنت لإتمام البيع.
+            </p>
+          )}
+
+          <Button
+            size="lg"
+            disabled={cart.length === 0 || checkingOut || blockedOffline}
+            onClick={() => void checkout()}
+          >
+            {checkingOut && <Loader2 className="size-4 animate-spin" aria-hidden />}
+            إتمام البيع
+          </Button>
+
+          {lastSale && (
+            <div className="rounded-md border border-border p-2 text-xs text-muted-foreground">
+              <p>آخر بيع: {formatDA(lastSale.total_amount)}</p>
+              <Button variant="link" size="sm" className="h-auto p-0" onClick={() => void printReceipt()}>
+                <Printer className="size-3.5" aria-hidden />
+                طباعة الفاتورة
+              </Button>
+            </div>
+          )}
+
+          <div className="surface flex flex-col items-center gap-1 p-3 text-center">
+            <img src={sumaLogo} alt="SUMA" className="size-14 rounded-xl" />
+            <p className="text-xs font-bold text-muted-foreground">إختياركم الأفضل</p>
+          </div>
+        </aside>
+      </div>
+
+      {/* ---- Custom no-barcode item dialog ---- */}
+      {showCustomItem && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4"
+          onClick={() => setShowCustomItem(false)}
+        >
+          <div className="surface w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-3 font-bold">صنف بدون باركود</h2>
+            <div className="space-y-2">
+              <Input
+                autoFocus
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                placeholder="اسم الصنف"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  value={customPrice}
+                  onChange={(e) => setCustomPrice(e.target.value)}
+                  placeholder="السعر (دج)"
+                />
+                <Input
+                  type="number"
+                  min={1}
+                  value={customQty}
+                  onChange={(e) => setCustomQty(e.target.value)}
+                  placeholder="الكمية"
+                />
+              </div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button variant="outline" className="flex-1" onClick={() => setShowCustomItem(false)}>
+                إلغاء
+              </Button>
+              <Button className="flex-1" onClick={addCustomItem}>
+                إضافة للسلة
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Return / refund dialog — online only, picks from recent sales ---- */}
+      {showReturn && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4"
+          onClick={() => setShowReturn(false)}
+        >
+          <div
+            className="surface flex max-h-[85vh] w-full max-w-lg flex-col p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-3 font-bold">إرجاع / استرجاع بيع سابق</h2>
+            {!isOnline ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                الإرجاع يحتاج اتصال بالإنترنت حاليًا.
+              </p>
+            ) : returnLoading ? (
+              <div className="grid place-items-center py-8">
+                <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
+              </div>
+            ) : !returnSale ? (
+              <ul className="divide-y divide-border overflow-y-auto">
+                {recentSales.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-muted-foreground">لا توجد مبيعات حديثة</p>
+                ) : (
+                  recentSales.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between px-2 py-2 text-start text-sm hover:bg-accent/40"
+                        onClick={() => void selectReturnSale(s)}
+                      >
+                        <span>
+                          {formatDA(s.total_amount)} · {s.item_count} صنف
+                        </span>
+                        <span className="text-xs text-muted-foreground num" dir="ltr">
+                          {new Date(s.created_at).toLocaleString("ar-DZ", { dateStyle: "short", timeStyle: "short" })}
+                        </span>
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="mb-2 self-start text-xs text-primary hover:underline"
+                  onClick={() => setReturnSale(null)}
+                >
+                  ← رجوع لقائمة المبيعات
+                </button>
+                <ul className="divide-y divide-border overflow-y-auto">
+                  {returnItems.map((item) => {
+                    const maxQty = item.quantity - item.refunded_quantity;
+                    return (
+                      <li key={item.id} className="flex items-center gap-2 py-2 text-sm">
+                        <span className="flex-1 truncate">{item.product_name}</span>
+                        <span className="text-xs text-muted-foreground num">
+                          ({item.quantity - item.refunded_quantity} متاح)
+                        </span>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={maxQty}
+                          disabled={maxQty <= 0}
+                          value={returnQty[item.id] || ""}
+                          onChange={(e) =>
+                            setReturnQty((q) => ({
+                              ...q,
+                              [item.id]: Math.max(0, Math.min(maxQty, Number(e.target.value) || 0)),
+                            }))
+                          }
+                          className="w-16"
+                        />
+                      </li>
+                    );
+                  })}
+                </ul>
+                <Button className="mt-3" disabled={returnSubmitting} onClick={() => void submitReturn()}>
+                  {returnSubmitting && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                  تأكيد الإرجاع
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

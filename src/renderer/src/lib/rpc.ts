@@ -11,9 +11,13 @@ import type { CustomerRow, SaleRow } from "./database.types";
  * request/response shape going over the wire is unaffected either way.
  */
 
+export type RecordSaleItem =
+  | { product_id: string; variant_id?: string | null; quantity: number; unit_price?: number }
+  | { name: string; unit_price: number; quantity: number };
+
 export type RecordSaleArgs = {
   _store_id: string;
-  _items: Array<{ product_id: string; variant_id?: string | null; quantity: number }>;
+  _items: RecordSaleItem[];
   _discount: number;
   _payment_method: "cash" | "card" | "credit";
   _customer_id?: string;
