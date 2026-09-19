@@ -387,11 +387,19 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
     });
     for (const row of lineRows) insertItem.run(row);
 
+    // The price charged offline is frozen here (lineRows.unit_price, read
+    // from the local mirror at THIS moment) and sent explicitly with the
+    // replay — record_sale() honors a supplied unit_price instead of
+    // re-reading its own current selling_price. Without this, a price
+    // change on another device before this synced would silently charge
+    // the server-side total at the NEW price while the cashier already
+    // collected cash at the old one, with nothing ever surfacing the
+    // mismatch (see the 20260919210000 migration for the server side).
     enqueue.run(
       cryptoRandomId(),
       JSON.stringify({
         _store_id: input.storeId,
-        _items: input.items.map((i) => ({ product_id: i.productId, quantity: i.quantity })),
+        _items: lineRows.map((r) => ({ product_id: r.product_id, quantity: r.quantity, unit_price: r.unit_price })),
         _discount: input.discount,
         _payment_method: input.paymentMethod,
         ...(input.customerId ? { _customer_id: input.customerId } : {}),

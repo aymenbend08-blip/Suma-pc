@@ -146,6 +146,56 @@ describe("createLocalSale", () => {
     expect(product.stock_quantity).toBe(-7); // 2 - 5 - 4
   });
 
+  it("freezes the price into the sync_queue payload at the moment of the offline sale", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 300 });
+    db.createLocalSale({
+      id: "sale-5",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-5",
+    });
+
+    const pending = db.listPendingSync();
+    const payload = JSON.parse(pending[0].payload) as {
+      _items: Array<{ product_id: string; quantity: number; unit_price: number }>;
+    };
+    expect(payload._items).toEqual([{ product_id: "prod-1", quantity: 1, unit_price: 300 }]);
+  });
+
+  it("keeps the already-enqueued price frozen even after the local product price changes later", () => {
+    // Simulates: offline sale at 300, then a hydrate() cycle (still
+    // offline-to-sync, but pulling fresher reference data some other way,
+    // or just the next price update reaching this device) overwrites the
+    // local product row's price to 350 BEFORE this queued sale syncs.
+    seedProduct({ stock_quantity: 10, selling_price: 300 });
+    db.createLocalSale({
+      id: "sale-6",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-6",
+    });
+
+    // Price changes locally AFTER the sale was already queued.
+    seedProduct({ stock_quantity: 10, selling_price: 350 });
+
+    const pending = db.listPendingSync();
+    const payload = JSON.parse(pending[0].payload) as {
+      _items: Array<{ product_id: string; quantity: number; unit_price: number }>;
+    };
+    // Still 300 — the queued payload was never re-read or re-priced.
+    expect(payload._items[0].unit_price).toBe(300);
+  });
+
   it("throws for a product unknown to the local mirror", () => {
     expect(() =>
       db.createLocalSale({
