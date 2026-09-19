@@ -351,16 +351,9 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
         | { id: string; name: string; selling_price: number; stock_quantity: number }
         | undefined;
       if (!product) throw new Error(`منتج غير معروف محليًا: ${item.productId}`);
-      // Mirrors record_sale()'s server-side stock check (added in the
-      // 20260919130000 migration) so an offline sale never even attempts
-      // to oversell locally — it used to always succeed here regardless
-      // of stock, and only fail (silently, until the sync-queue review
-      // screen) once the same check ran again at sync time.
-      if (Number(product.stock_quantity) < item.quantity) {
-        throw new Error(
-          `الكمية المطلوبة (${item.quantity}) أكبر من المخزون المتوفر محليًا (${product.stock_quantity}) لـ ${product.name}.`,
-        );
-      }
+      // Overselling is allowed on purpose (matches record_sale()'s
+      // 20260919200000 migration) — stock_quantity is left to go
+      // negative below, never rejected or floored.
       const lineTotal = Number(product.selling_price) * item.quantity;
       subtotal += lineTotal;
       itemCount += item.quantity;

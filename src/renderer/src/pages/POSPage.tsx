@@ -148,21 +148,14 @@ export function POSPage() {
 
   const subtotal = cart.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
   const total = Math.max(0, subtotal - discount);
-  // Only meaningful while offline: online, record_sale() is the
-  // authoritative stock check and this locally-cached figure can be
-  // stale. Offline, it's the same check createLocalSale() will run
-  // anyway — surfacing it here lets the cashier fix the cart before
-  // trying, instead of after.
+  // Informational only — overselling is allowed on purpose (matches
+  // record_sale()'s 20260919200000 migration), so this never blocks
+  // checkout. Only meaningful while offline: online, the server is the
+  // authoritative source and this locally-cached figure can be stale.
   const insufficientLines = !isOnline ? cart.filter((l) => l.quantity > l.stockQuantity) : [];
 
   async function checkout() {
     if (cart.length === 0) return;
-    if (insufficientLines.length > 0) {
-      toast.error(
-        `المخزون المحلي غير كافٍ لـ ${insufficientLines.map((l) => l.name).join("، ")} — قلّل الكمية أو انتظر الاتصال.`,
-      );
-      return;
-    }
     setCheckingOut(true);
     const { data, error } = await recordSale({
       _store_id: storeId,
@@ -388,13 +381,9 @@ export function POSPage() {
           />
         </div>
 
-        <Button
-          size="lg"
-          disabled={cart.length === 0 || checkingOut || insufficientLines.length > 0}
-          onClick={() => void checkout()}
-        >
+        <Button size="lg" disabled={cart.length === 0 || checkingOut} onClick={() => void checkout()}>
           {checkingOut && <Loader2 className="size-4 animate-spin" aria-hidden />}
-          {insufficientLines.length > 0 ? "المخزون المحلي غير كافٍ" : "إتمام البيع"}
+          إتمام البيع
         </Button>
 
         {lastSale && (

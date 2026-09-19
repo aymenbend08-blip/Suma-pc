@@ -96,59 +96,54 @@ describe("createLocalSale", () => {
     expect(payload._client_request_id).toBe("req-1");
   });
 
-  it("rejects a line exceeding local stock and leaves everything untouched", () => {
+  it("allows overselling and lets stock go negative (business decision, not a bug)", () => {
     seedProduct({ stock_quantity: 2 });
 
-    expect(() =>
-      db.createLocalSale({
-        id: "sale-2",
-        storeId: "store-1",
-        cashierId: "cashier-1",
-        cashierName: null,
-        items: [{ productId: "prod-1", quantity: 5 }],
-        discount: 0,
-        paymentMethod: "cash",
-        customerId: null,
-        clientRequestId: "req-2",
-      }),
-    ).toThrow(/أكبر من المخزون المتوفر محليًا/);
+    const result = db.createLocalSale({
+      id: "sale-2",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 5 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-2",
+    });
 
+    expect(result.total_amount).toBe(500); // full quantity charged, not clamped
     const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
-    expect(product.stock_quantity).toBe(2); // unchanged
-    expect(db.listPendingSync()).toHaveLength(0); // nothing enqueued
+    expect(product.stock_quantity).toBe(-3); // real deficit, not floored at 0
+    expect(db.listPendingSync()).toHaveLength(1);
   });
 
-  it("rolls back the whole cart when only the second line is oversold", () => {
-    // replaceProducts replaces the whole store's product set in one call
-    // (it DELETEs by store_id first) — both fixtures must be seeded
-    // together, not via two separate seedProduct() calls.
-    db.replaceProducts("store-1", [
-      seedProductRow({ id: "prod-1", barcode: "1111", stock_quantity: 10 }),
-      seedProductRow({ id: "prod-2", barcode: "2222", stock_quantity: 1 }),
-    ]);
+  it("a second oversold sale keeps compounding the negative stock correctly", () => {
+    seedProduct({ stock_quantity: 2 });
+    db.createLocalSale({
+      id: "sale-3a",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 5 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-3a",
+    });
+    db.createLocalSale({
+      id: "sale-3b",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 4 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-3b",
+    });
 
-    expect(() =>
-      db.createLocalSale({
-        id: "sale-3",
-        storeId: "store-1",
-        cashierId: "cashier-1",
-        cashierName: null,
-        items: [
-          { productId: "prod-1", quantity: 3 },
-          { productId: "prod-2", quantity: 5 },
-        ],
-        discount: 0,
-        paymentMethod: "cash",
-        customerId: null,
-        clientRequestId: "req-3",
-      }),
-    ).toThrow();
-
-    // prod-1's stock must be unchanged even though it was processed
-    // first in the loop, before the rejection on prod-2.
-    const firstProduct = db.findProductByBarcode("store-1", "1111") as { stock_quantity: number };
-    expect(firstProduct.stock_quantity).toBe(10);
-    expect(db.listPendingSync()).toHaveLength(0);
+    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    expect(product.stock_quantity).toBe(-7); // 2 - 5 - 4
   });
 
   it("throws for a product unknown to the local mirror", () => {
