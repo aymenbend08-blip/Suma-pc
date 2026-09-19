@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { StoreProvider, useStore } from "@/context/StoreContext";
+import { SyncProvider } from "@/context/SyncContext";
 import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
 import { POSPage } from "@/pages/POSPage";
@@ -13,7 +14,7 @@ function Centered({ children }: { children: React.ReactNode }) {
 }
 
 function AuthedApp() {
-  const { loading, error, active, stores, perms } = useStore();
+  const { loading, error, active, stores, perms, userId } = useStore();
   const [page, setPage] = useState<Page>("pos");
 
   if (loading) {
@@ -39,20 +40,22 @@ function AuthedApp() {
       </Centered>
     );
   }
-  if (!active) return null;
+  if (!active || !userId) return null;
 
   const effectivePage: Page = page === "pos" && !perms.canUsePos ? "customers" : page;
 
   return (
-    <Shell page={effectivePage} onNavigate={setPage}>
-      {effectivePage === "pos" && perms.canUsePos && <POSPage />}
-      {effectivePage === "customers" && perms.canManageCustomers && <CustomersPage />}
-      {!perms.canUsePos && !perms.canManageCustomers && (
-        <p className="p-6 text-center text-sm text-muted-foreground">
-          ما عندكش صلاحية استعمال نقطة البيع أو إدارة الزبائن في هذا المحل.
-        </p>
-      )}
-    </Shell>
+    <SyncProvider storeId={active.id} userId={userId}>
+      <Shell page={effectivePage} onNavigate={setPage}>
+        {effectivePage === "pos" && perms.canUsePos && <POSPage />}
+        {effectivePage === "customers" && perms.canManageCustomers && <CustomersPage />}
+        {!perms.canUsePos && !perms.canManageCustomers && (
+          <p className="p-6 text-center text-sm text-muted-foreground">
+            ما عندكش صلاحية استعمال نقطة البيع أو إدارة الزبائن في هذا المحل.
+          </p>
+        )}
+      </Shell>
+    </SyncProvider>
   );
 }
 

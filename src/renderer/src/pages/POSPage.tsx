@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, Minus, Plus, Printer, ScanBarcode, Trash2, UserRound, X } from "lucide-react";
-import { supabase } from "@/lib/supabase";
 import { recordSale } from "@/lib/rpc";
+import { localDb } from "@/lib/localdb";
+import { isNetworkError } from "@/lib/net";
 import { useStore } from "@/context/StoreContext";
+import { useAuth } from "@/context/AuthContext";
+import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
 import { uuid } from "@/lib/uuid";
 import type { CustomerRow, ProductRow, SaleRow } from "@/lib/database.types";
@@ -19,14 +22,18 @@ type CartLine = {
 };
 
 /**
- * Checkout goes through the exact same record_sale() RPC as SUMA Web's
- * pos.functions.ts `checkout` — same params, same client_request_id
- * idempotency scheme — so a sale from Desktop is indistinguishable from
- * one rung up on the phone, and stock/credit stay correct regardless of
- * which app made the sale.
+ * Checkout tries the exact same record_sale() RPC as SUMA Web's
+ * pos.functions.ts `checkout` first — same params, same client_request_id
+ * idempotency scheme — so an online sale from Desktop is indistinguishable
+ * from one rung up on the phone. Only on a network-shaped failure does it
+ * fall back to writing the sale into the local SQLite outbox for the sync
+ * engine to replay against that exact same RPC once back online — the
+ * online path itself is never weakened to make offline simpler.
  */
 export function POSPage() {
   const { active } = useStore();
+  const { session } = useAuth();
+  const { refreshPending } = useSync();
   const storeId = active!.id;
 
   const [search, setSearch] = useState("");
@@ -51,8 +58,10 @@ export function POSPage() {
     searchRef.current?.focus();
   }, []);
 
-  // Debounced live search by name/barcode/internal code — same fields
-  // products.functions.ts's listProducts searches, simplified for POS speed.
+  // Search always reads the local SQLite mirror — never a live Supabase
+  // query — so it's equally fast and equally functional online or
+  // offline, and the sync engine (SyncContext) is what keeps this data
+  // fresh in the background. No debounce needed: this is a local query.
   useEffect(() => {
     const term = search.trim();
     if (!term) {
@@ -60,20 +69,15 @@ export function POSPage() {
       return;
     }
     setSearching(true);
-    const t = setTimeout(async () => {
-      const safe = term.replace(/[%,]/g, " ").trim();
-      const { data } = await supabase
-        .from("products")
-        .select("*")
-        .eq("store_id", storeId)
-        .eq("is_active", true)
-        .or(`name.ilike.%${safe}%,barcode.ilike.%${safe}%,internal_code.ilike.%${safe}%`)
-        .order("name")
-        .limit(20);
-      setResults(data ?? []);
+    let cancelled = false;
+    void localDb.searchProducts(storeId, term).then((rows) => {
+      if (cancelled) return;
+      setResults(rows);
       setSearching(false);
-    }, 200);
-    return () => clearTimeout(t);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [search, storeId]);
 
   useEffect(() => {
@@ -82,19 +86,13 @@ export function POSPage() {
       setCustomerResults([]);
       return;
     }
-    const t = setTimeout(async () => {
-      const safe = term.replace(/[%,]/g, " ").trim();
-      const { data } = await supabase
-        .from("customers")
-        .select("*")
-        .eq("store_id", storeId)
-        .eq("status", "approved")
-        .or(`full_name.ilike.%${safe}%,phone.ilike.%${safe}%`)
-        .order("full_name")
-        .limit(20);
-      setCustomerResults(data ?? []);
-    }, 200);
-    return () => clearTimeout(t);
+    let cancelled = false;
+    void localDb.searchCustomers(storeId, term).then((rows) => {
+      if (!cancelled) setCustomerResults(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [customerQuery, storeId]);
 
   function addToCart(p: ProductRow) {
@@ -129,21 +127,10 @@ export function POSPage() {
     if (results.length === 1) return addToCart(results[0]);
 
     // Not a primary barcode / not narrowed to one match yet — check
-    // product_barcodes aliases (a product can have more than one barcode).
-    const { data: alias } = await supabase
-      .from("product_barcodes")
-      .select("product_id")
-      .eq("store_id", storeId)
-      .eq("barcode", term)
-      .maybeSingle();
-    if (alias) {
-      const { data: product } = await supabase
-        .from("products")
-        .select("*")
-        .eq("id", alias.product_id)
-        .maybeSingle();
-      if (product) return addToCart(product);
-    }
+    // product_barcodes aliases (a product can have more than one barcode),
+    // also against the local mirror so a scan works offline too.
+    const product = await localDb.findProductByBarcode(storeId, term);
+    if (product) return addToCart(product);
     toast.error("ما لقيناش منتج بهذا الباركود أو الاسم.");
   }
 
@@ -173,21 +160,50 @@ export function POSPage() {
       ...(customer ? { _customer_id: customer.id } : {}),
       _client_request_id: clientRequestId,
     });
-    setCheckingOut(false);
 
-    if (error || !data) {
-      const message = error?.message ?? "تعذر إتمام البيع.";
-      const isNetwork = /fetch|network|failed to fetch/i.test(message);
-      toast.error(
-        isNetwork
-          ? "تعذر الاتصال بالسيرفر — تحقق من الإنترنت وحاول مرة أخرى (نفس العملية لن تتكرر)."
-          : message,
-      );
+    if (!error && data) {
+      setCheckingOut(false);
+      setLastSale(data);
+      toast.success(`تم البيع بنجاح — ${formatDA(data.total_amount)}`);
+      resetCartAfterSale();
       return;
     }
 
-    setLastSale(data);
-    toast.success(`تم البيع بنجاح — ${formatDA(data.total_amount)}`);
+    const message = error?.message ?? "تعذر إتمام البيع.";
+    if (!isNetworkError(message)) {
+      setCheckingOut(false);
+      toast.error(message);
+      return;
+    }
+
+    // Offline (or the request never reached Supabase) — record the sale
+    // locally with the exact same client_request_id, and queue that same
+    // record_sale() call for the sync engine to replay once back online.
+    // The cashier sees success either way; nothing about the sale cycle
+    // itself branches on connectivity beyond this one fallback.
+    try {
+      const localSale = await localDb.createLocalSale({
+        id: clientRequestId,
+        storeId,
+        cashierId: session!.user.id,
+        cashierName: session!.user.email ?? null,
+        items: cart.map((l) => ({ productId: l.productId, quantity: l.quantity })),
+        discount,
+        paymentMethod,
+        customerId: customer?.id ?? null,
+        clientRequestId,
+      });
+      setCheckingOut(false);
+      toast.success(`تم البيع (بدون إنترنت) — ${formatDA(localSale.total_amount)} — سيُزامن تلقائيًا.`);
+      refreshPending();
+      resetCartAfterSale();
+    } catch (localError) {
+      setCheckingOut(false);
+      toast.error(localError instanceof Error ? localError.message : "تعذر إتمام البيع حتى محليًا.");
+    }
+  }
+
+  function resetCartAfterSale() {
     setCart([]);
     setDiscount(0);
     setCustomer(null);

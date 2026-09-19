@@ -1,7 +1,8 @@
 import { type ReactNode } from "react";
-import { LogOut, ShoppingCart, Users } from "lucide-react";
+import { CloudOff, Loader2, LogOut, ShoppingCart, Users, Wifi } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useStore } from "@/context/StoreContext";
+import { useSync } from "@/context/SyncContext";
 import { Button } from "@/components/ui/button";
 
 export type Page = "pos" | "customers";
@@ -17,6 +18,7 @@ export function Shell({
 }) {
   const { signOut } = useAuth();
   const { stores, active, select, perms } = useStore();
+  const { isOnline, pendingCount, syncing } = useSync();
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -61,7 +63,24 @@ export function Shell({
           )}
         </nav>
 
-        <Button variant="ghost" size="sm" className="ms-auto" onClick={() => void signOut()}>
+        <div
+          className={`ms-auto flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+            isOnline ? "bg-success/15 text-success" : "bg-warning/20 text-warning"
+          }`}
+          title={isOnline ? "متصل بالإنترنت" : "غير متصل — العمل مستمر محليًا"}
+        >
+          {syncing ? (
+            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          ) : isOnline ? (
+            <Wifi className="size-3.5" aria-hidden />
+          ) : (
+            <CloudOff className="size-3.5" aria-hidden />
+          )}
+          {isOnline ? "متصل" : "غير متصل"}
+          {pendingCount > 0 && <span className="num">({pendingCount})</span>}
+        </div>
+
+        <Button variant="ghost" size="sm" onClick={() => void signOut()}>
           <LogOut className="size-4" aria-hidden />
           خروج
         </Button>

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, Wallet } from "lucide-react";
-import { supabase } from "@/lib/supabase";
 import { payCustomerCredit } from "@/lib/rpc";
+import { localDb } from "@/lib/localdb";
+import { isNetworkError } from "@/lib/net";
 import { useStore } from "@/context/StoreContext";
+import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
 import type { CustomerRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
@@ -11,9 +13,11 @@ import { Input } from "@/components/ui/input";
 
 /** Same pay_customer_credit() RPC SUMA Web uses — a payment amount, never
  * an absolute balance, so it's safe regardless of what else touches this
- * customer's account at the same time. */
+ * customer's account at the same time. Falls back to the same local
+ * outbox as POS checkout when offline. */
 export function CustomersPage() {
   const { active } = useStore();
+  const { refreshPending } = useSync();
   const storeId = active!.id;
 
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
@@ -25,14 +29,7 @@ export function CustomersPage() {
 
   async function load() {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("customers")
-      .select("*")
-      .eq("store_id", storeId)
-      .eq("status", "approved")
-      .order("full_name");
-    if (error) toast.error(error.message);
-    setCustomers(data ?? []);
+    setCustomers(await localDb.listCustomers(storeId));
     setLoading(false);
   }
 
@@ -60,12 +57,33 @@ export function CustomersPage() {
       _store_id: storeId,
       _amount: value,
     });
-    setPaying(false);
-    if (error) {
+
+    if (!error) {
+      setPaying(false);
+      toast.success("تم تسجيل الدفعة");
+      setPayTarget(null);
+      setAmount("");
+      void load();
+      return;
+    }
+
+    if (!isNetworkError(error.message)) {
+      setPaying(false);
       toast.error(error.message);
       return;
     }
-    toast.success("تم تسجيل الدفعة");
+
+    // Offline — apply the same delta locally and queue the real RPC call
+    // for the sync engine, exactly like an offline sale.
+    await localDb.applyLocalCreditPayment(payTarget.id, value);
+    await localDb.enqueueOperation("pay_customer_credit", {
+      _customer_id: payTarget.id,
+      _store_id: storeId,
+      _amount: value,
+    });
+    setPaying(false);
+    toast.success("تم تسجيل الدفعة (بدون إنترنت) — ستُزامن تلقائيًا.");
+    refreshPending();
     setPayTarget(null);
     setAmount("");
     void load();

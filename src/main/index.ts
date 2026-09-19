@@ -1,5 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
+import { initDb } from "./db";
+import { registerDbIpc } from "./ipc-db";
 
 const isDev = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
@@ -48,6 +50,9 @@ function createWindow(): void {
 
 void app.whenReady().then(() => {
   app.setAppUserModelId("com.suma.desktop");
+
+  initDb(app.getPath("userData"));
+  registerDbIpc();
 
   // Prints the receipt page to the system's default printer (e.g. a
   // thermal 80mm printer set as default on Windows) with no dialog —

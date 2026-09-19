@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import { localDb } from "@/lib/localdb";
+import { isNetworkError } from "@/lib/net";
 import type { StoreMemberRow, StoreRow } from "@/lib/database.types";
 import { useAuth } from "./AuthContext";
 
@@ -18,6 +20,9 @@ export type StorePermissions = {
 type StoreState = {
   loading: boolean;
   error: string | null;
+  /** True when stores/permissions came from the local SQLite cache
+   * because Supabase wasn't reachable at all yet this session. */
+  offlineFallback: boolean;
   stores: StoreRow[];
   active: StoreRow | null;
   select: (id: string) => void;
@@ -56,6 +61,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [offlineFallback, setOfflineFallback] = useState(false);
   const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
@@ -79,6 +85,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           .eq("user_id", userId),
       ]);
       if (cancelled) return;
+
+      // A network-shaped failure here means we're offline before any
+      // hydrate() cycle has ever primed the local SQLite mirror this
+      // session — e.g. the app opened with no Wi-Fi yet. Falling back to
+      // whatever was cached from the LAST time this device was online
+      // lets the cashier get into POS immediately instead of staring at
+      // an error screen; a real rejection (bad RLS, etc.) still surfaces.
+      if (storesRes.error && isNetworkError(storesRes.error.message)) {
+        const [localStores, localMembers] = await Promise.all([
+          localDb.getStores(),
+          localDb.getStoreMembers(userId),
+        ]);
+        if (cancelled) return;
+        setOfflineFallback(true);
+        setStores(localStores);
+        setMemberships(localMembers);
+        setLoading(false);
+        return;
+      }
+
+      setOfflineFallback(false);
       if (storesRes.error) setError(storesRes.error.message);
       setStores(storesRes.data ?? []);
       setMemberships(membersRes.data ?? []);
@@ -120,6 +147,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       value={{
         loading,
         error,
+        offlineFallback,
         stores,
         active,
         select,
