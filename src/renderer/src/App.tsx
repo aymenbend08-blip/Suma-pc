@@ -5,13 +5,13 @@ import { StoreProvider, useStore } from "@/context/StoreContext";
 import { SyncProvider } from "@/context/SyncContext";
 import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
-import { HomePage, type HomeNavOptions } from "@/pages/HomePage";
+import { HomePage } from "@/pages/HomePage";
 import { POSPage } from "@/pages/POSPage";
 import { CustomersPage } from "@/pages/CustomersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SyncQueuePage } from "@/pages/SyncQueuePage";
 import { ComingSoonPage } from "@/pages/ComingSoonPage";
-import { Shell, type Page } from "@/components/Shell";
+import { Shell, type NavOptions, type Page } from "@/components/Shell";
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="grid min-h-screen place-items-center">{children}</div>;
@@ -20,9 +20,9 @@ function Centered({ children }: { children: React.ReactNode }) {
 function AuthedApp() {
   const { loading, error, active, stores, perms, userId } = useStore();
   const [page, setPage] = useState<Page>("home");
-  const [navOpts, setNavOpts] = useState<HomeNavOptions>({});
+  const [navOpts, setNavOpts] = useState<NavOptions>({});
 
-  function navigate(next: Page, opts: HomeNavOptions = {}) {
+  function navigate(next: Page, opts: NavOptions = {}) {
     setNavOpts(opts);
     setPage(next);
   }
@@ -62,7 +62,7 @@ function AuthedApp() {
 
   return (
     <SyncProvider storeId={active.id} userId={userId}>
-      <Shell page={effectivePage} onNavigate={navigate}>
+      <Shell page={effectivePage} navOpts={navOpts} onNavigate={navigate}>
         {effectivePage === "home" && <HomePage onNavigate={navigate} />}
         {effectivePage === "pos" && perms.canUsePos && <POSPage autoOpenReturn={navOpts.autoOpenReturn} />}
         {effectivePage === "customers" && perms.canManageCustomers && (

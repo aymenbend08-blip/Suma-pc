@@ -11,9 +11,7 @@ import {
 } from "lucide-react";
 import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
-import type { Page } from "@/components/Shell";
-
-export type HomeNavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string };
+import type { Navigate } from "@/components/Shell";
 
 type Tile = {
   key: string;
@@ -32,7 +30,7 @@ type Tile = {
  * separate screens that say so plainly (ComingSoonPage) rather than dead
  * buttons or a faked flow.
  */
-export function HomePage({ onNavigate }: { onNavigate: (page: Page, opts?: HomeNavOptions) => void }) {
+export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
   const { active, perms } = useStore();
   const { failedCount } = useSync();
 
