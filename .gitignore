@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+release/
+.env
+*.local
+.DS_Store
+npm-debug.log*
+screenshot.png
+*.tsbuildinfo
