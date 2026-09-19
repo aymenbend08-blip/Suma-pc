@@ -7,6 +7,7 @@ import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
 import { POSPage } from "@/pages/POSPage";
 import { CustomersPage } from "@/pages/CustomersPage";
+import { SyncQueuePage } from "@/pages/SyncQueuePage";
 import { Shell, type Page } from "@/components/Shell";
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -49,6 +50,7 @@ function AuthedApp() {
       <Shell page={effectivePage} onNavigate={setPage}>
         {effectivePage === "pos" && perms.canUsePos && <POSPage />}
         {effectivePage === "customers" && perms.canManageCustomers && <CustomersPage />}
+        {effectivePage === "sync" && perms.isAdmin && <SyncQueuePage />}
         {!perms.canUsePos && !perms.canManageCustomers && (
           <p className="p-6 text-center text-sm text-muted-foreground">
             ما عندكش صلاحية استعمال نقطة البيع أو إدارة الزبائن في هذا المحل.

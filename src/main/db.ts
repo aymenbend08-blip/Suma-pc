@@ -477,3 +477,39 @@ export function markSyncRetry(id: string, error: string): void {
     .prepare("UPDATE sync_queue SET last_error = ?, retry_count = retry_count + 1 WHERE id = ?")
     .run(error, id);
 }
+
+// ---- Failed-sync review (the owner's only way to ever see a permanently
+// rejected offline operation — previously nothing beyond a toast at the
+// moment of failure) --------------------------------------------------
+
+export function listFailedSync(): SyncQueueItem[] {
+  return getDb()
+    .prepare("SELECT * FROM sync_queue WHERE status = 'failed' ORDER BY created_at DESC")
+    .all() as SyncQueueItem[];
+}
+
+export function countFailedSync(): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) as n FROM sync_queue WHERE status = 'failed'")
+    .get() as { n: number };
+  return row.n;
+}
+
+/** Puts a failed item back in the queue for the sync engine to retry —
+ * e.g. the owner topped up stock or approved the customer manually and
+ * wants this same operation re-sent now. */
+export function retryFailedSync(id: string): void {
+  getDb()
+    .prepare("UPDATE sync_queue SET status = 'pending', last_error = NULL WHERE id = ? AND status = 'failed'")
+    .run(id);
+}
+
+/** Acknowledges a failed item without retrying it — the owner reconciled
+ * it some other way (or decided it doesn't matter) and wants it off the
+ * review list. Kept as a row (status = 'dismissed'), never deleted, so
+ * the audit trail survives. */
+export function dismissFailedSync(id: string): void {
+  getDb()
+    .prepare("UPDATE sync_queue SET status = 'dismissed' WHERE id = ? AND status = 'failed'")
+    .run(id);
+}

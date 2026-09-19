@@ -49,6 +49,11 @@ export const localDb = {
   markSyncDone: (id: string) => window.suma.db.markSyncDone(id),
   markSyncFailed: (id: string, error: string) => window.suma.db.markSyncFailed(id, error),
   markSyncRetry: (id: string, error: string) => window.suma.db.markSyncRetry(id, error),
+
+  listFailedSync: async (): Promise<SyncQueueItem[]> => (await window.suma.db.listFailedSync()) as SyncQueueItem[],
+  countFailedSync: async (): Promise<number> => (await window.suma.db.countFailedSync()) as number,
+  retryFailedSync: (id: string) => window.suma.db.retryFailedSync(id),
+  dismissFailedSync: (id: string) => window.suma.db.dismissFailedSync(id),
 };
 
 export type LocalSaleInput = {

@@ -40,6 +40,11 @@ const api = {
     markSyncDone: (id: string) => ipcRenderer.invoke("db:markSyncDone", id),
     markSyncFailed: (id: string, error: string) => ipcRenderer.invoke("db:markSyncFailed", id, error),
     markSyncRetry: (id: string, error: string) => ipcRenderer.invoke("db:markSyncRetry", id, error),
+
+    listFailedSync: () => ipcRenderer.invoke("db:listFailedSync"),
+    countFailedSync: () => ipcRenderer.invoke("db:countFailedSync"),
+    retryFailedSync: (id: string) => ipcRenderer.invoke("db:retryFailedSync", id),
+    dismissFailedSync: (id: string) => ipcRenderer.invoke("db:dismissFailedSync", id),
   },
 };
 

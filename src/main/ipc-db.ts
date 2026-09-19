@@ -46,4 +46,9 @@ export function registerDbIpc(): void {
   ipcMain.handle("db:markSyncDone", (_e, id: string) => db.markSyncDone(id));
   ipcMain.handle("db:markSyncFailed", (_e, id: string, error: string) => db.markSyncFailed(id, error));
   ipcMain.handle("db:markSyncRetry", (_e, id: string, error: string) => db.markSyncRetry(id, error));
+
+  ipcMain.handle("db:listFailedSync", () => db.listFailedSync());
+  ipcMain.handle("db:countFailedSync", () => db.countFailedSync());
+  ipcMain.handle("db:retryFailedSync", (_e, id: string) => db.retryFailedSync(id));
+  ipcMain.handle("db:dismissFailedSync", (_e, id: string) => db.dismissFailedSync(id));
 }

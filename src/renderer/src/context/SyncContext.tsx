@@ -9,8 +9,10 @@ const CYCLE_MS = 30_000;
 type SyncState = {
   isOnline: boolean;
   pendingCount: number;
+  failedCount: number;
   syncing: boolean;
   refreshPending: () => void;
+  refreshFailed: () => void;
   syncNow: () => Promise<void>;
 };
 
@@ -34,11 +36,16 @@ export function SyncProvider({
 }) {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
+  const [failedCount, setFailedCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const runningRef = useRef(false);
 
   async function refreshPending() {
     setPendingCount(await localDb.countPendingSync());
+  }
+
+  async function refreshFailed() {
+    setFailedCount(await localDb.countFailedSync());
   }
 
   async function runCycle() {
@@ -55,9 +62,10 @@ export function SyncProvider({
         );
       }
       if (drainResult.failed > 0) {
-        toast.error(`${drainResult.failed} عملية معلّقة رُفضت عند المزامنة — راجعها.`);
+        toast.error(`${drainResult.failed} عملية معلّقة رُفضت عند المزامنة — راجعها من "متابعة المزامنة".`);
       }
       await refreshPending();
+      await refreshFailed();
 
       const hydrateResult = await hydrate(storeId, userId);
       if (hydrateResult.ok) setIsOnline(true);
@@ -90,7 +98,7 @@ export function SyncProvider({
 
   return (
     <SyncContext.Provider
-      value={{ isOnline, pendingCount, syncing, refreshPending, syncNow: runCycle }}
+      value={{ isOnline, pendingCount, failedCount, syncing, refreshPending, refreshFailed, syncNow: runCycle }}
     >
       {children}
     </SyncContext.Provider>
