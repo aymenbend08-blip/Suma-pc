@@ -405,6 +405,12 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
     // the server-side total at the NEW price while the cashier already
     // collected cash at the old one, with nothing ever surfacing the
     // mismatch (see the 20260919210000 migration for the server side).
+    //
+    // _occurred_at carries the same reasoning to the sale's DATE:
+    // record_sale() defaults to its own now() (sync time) when this is
+    // omitted, which is correct for a normal online sale but wrong for a
+    // replayed offline one — nowIso here is this device's clock at the
+    // actual moment of sale, exactly what "when did this happen" means.
     enqueue.run(
       cryptoRandomId(),
       JSON.stringify({
@@ -414,6 +420,7 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
         _payment_method: input.paymentMethod,
         ...(input.customerId ? { _customer_id: input.customerId } : {}),
         _client_request_id: input.clientRequestId,
+        _occurred_at: nowIso,
       }),
       nowIso,
     );

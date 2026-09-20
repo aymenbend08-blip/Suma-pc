@@ -22,6 +22,11 @@ export type RecordSaleArgs = {
   _payment_method: "cash" | "card" | "credit";
   _customer_id?: string;
   _client_request_id?: string;
+  /** The real sale moment, sent only when replaying a queued offline
+   * sale — record_sale() uses it instead of its own now() so the sale
+   * isn't attributed to whatever day it happened to sync on. Omitted
+   * for a normal online sale, where now() is already correct. */
+  _occurred_at?: string;
 };
 
 export async function recordSale(args: RecordSaleArgs) {

@@ -167,6 +167,32 @@ describe("createLocalSale", () => {
     expect(payload._items).toEqual([{ product_id: "prod-1", quantity: 1, unit_price: 300 }]);
   });
 
+  it("sends the real offline sale moment as _occurred_at, so a later sync doesn't misdate it", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 300 });
+    const before = Date.now();
+    db.createLocalSale({
+      id: "sale-occurred",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-occurred",
+    });
+    const after = Date.now();
+
+    const pending = db.listPendingSync();
+    const payload = JSON.parse(pending[0].payload) as { _occurred_at: string };
+    const occurredAtMs = new Date(payload._occurred_at).getTime();
+    // Captured at the moment of the actual (offline) sale, not left for
+    // record_sale() to stamp with its own now() whenever this eventually
+    // syncs — which could be hours or days later.
+    expect(occurredAtMs).toBeGreaterThanOrEqual(before);
+    expect(occurredAtMs).toBeLessThanOrEqual(after);
+  });
+
   it("keeps the already-enqueued price frozen even after the local product price changes later", () => {
     // Simulates: offline sale at 300, then a hydrate() cycle (still
     // offline-to-sync, but pulling fresher reference data some other way,

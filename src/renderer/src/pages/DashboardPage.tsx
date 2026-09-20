@@ -52,7 +52,7 @@ export function DashboardPage() {
           .from("sales")
           .select("id, total_amount, refunded_amount, payment_method")
           .eq("store_id", storeId)
-          .gte("created_at", startOfDay.toISOString()),
+          .gte("occurred_at", startOfDay.toISOString()),
         supabase.from("customers").select("credit_balance").eq("store_id", storeId).eq("status", "approved"),
         supabase
           .from("products")

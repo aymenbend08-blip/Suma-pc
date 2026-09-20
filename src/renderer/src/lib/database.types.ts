@@ -146,6 +146,7 @@ export type SaleRow = {
   total_amount: number;
   item_count: number;
   created_at: string;
+  occurred_at: string;
   discount_amount: number;
   payment_method: "cash" | "card" | "credit";
   refunded_amount: number;
@@ -294,6 +295,7 @@ export type Database = {
           _payment_method: string;
           _customer_id?: string;
           _client_request_id?: string;
+          _occurred_at?: string;
         };
         Returns: SaleRow;
       };
