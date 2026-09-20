@@ -305,69 +305,97 @@ export function ProductsPage() {
         <p className="surface py-8 text-center text-sm text-muted-foreground">ما كانش منتجات</p>
       ) : (
         <>
-          <ul className="grid gap-3">
-            {rows.map((row) => {
-              const stock = Number(row.stock_quantity);
-              const low = Number(row.low_stock_threshold);
-              return (
-                <li key={row.id} className="surface flex flex-wrap items-center gap-3 p-4">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-bold">{row.name}</p>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <span>{categoryName(row.category_id)}</span>
-                      {row.barcode && <span className="num">• {row.barcode}</span>}
-                      {row.internal_code && <span className="num">• {row.internal_code}</span>}
-                      <span>
-                        •{" "}
+          {/* A dense table, not a stacked card list — desktop has the width
+              to show every column at once, so it should, rather than
+              reusing the phone-width layout SUMA Web's own list uses. */}
+          <div className="surface overflow-hidden p-0">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-[var(--primary)] text-[var(--primary-foreground)]">
+                  <th className="px-3 py-2 text-start font-bold">المنتج</th>
+                  <th className="px-3 py-2 text-start font-bold">الباركود / الكود</th>
+                  <th className="px-3 py-2 text-start font-bold">التصنيف</th>
+                  <th className="w-28 px-3 py-2 text-end font-bold">السعر</th>
+                  <th className="w-40 px-3 py-2 text-center font-bold">المخزون</th>
+                  {perms.canManageProducts && <th className="w-24 px-3 py-2 text-center font-bold">مفعّل</th>}
+                  {perms.canManageProducts && <th className="w-24 px-3 py-2 text-center font-bold">إجراءات</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const stock = Number(row.stock_quantity);
+                  const low = Number(row.low_stock_threshold);
+                  return (
+                    <tr key={row.id} className={`border-b border-border last:border-0 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          {row.image_url ? (
+                            <img src={row.image_url} alt="" className="size-9 shrink-0 rounded-md object-cover" />
+                          ) : (
+                            <div className="size-9 shrink-0 rounded-md bg-[var(--muted)]" />
+                          )}
+                          <span className="truncate font-medium">{row.name}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
+                        {[row.barcode, row.internal_code].filter(Boolean).join(" · ") || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-muted-foreground">{categoryName(row.category_id)}</td>
+                      <td className="px-3 py-2 text-end font-bold num">{formatDA(row.selling_price)}</td>
+                      <td className="px-3 py-2 text-center">
                         {stock <= 0 ? (
-                          <span className="rounded-full bg-[var(--destructive)] px-1.5 py-0.5 text-[10px] font-bold text-white">
-                            كمل
-                          </span>
+                          <span className="rounded-full bg-[var(--destructive)] px-2 py-0.5 text-[11px] font-bold text-white">كمل</span>
                         ) : stock <= low ? (
-                          <span className="rounded-full bg-[var(--warning)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--warning-foreground)] num">
-                            مخزون ناقص ({stock})
+                          <span className="rounded-full bg-[var(--warning)] px-2 py-0.5 text-[11px] font-bold text-[var(--warning-foreground)] num">
+                            ناقص ({stock})
                           </span>
                         ) : (
-                          <span className="num">
-                            المخزون: {stock} {row.unit}
+                          <span className="text-xs num">
+                            {stock} {row.unit}
                           </span>
                         )}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-lg font-black num">{formatDA(row.selling_price)}</div>
-                  {perms.canManageProducts && (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => void toggleActive(row)}
-                        className={`h-6 w-11 rounded-full transition-colors ${row.is_active ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
-                        aria-label="تفعيل / تعطيل"
-                      >
-                        <span
-                          className={`block size-5 rounded-full bg-white shadow transition-transform ${row.is_active ? "translate-x-0.5" : "translate-x-5"}`}
-                        />
-                      </button>
-                      <Button
-                        size="icon"
-                        variant="outline"
-                        aria-label="تعديل"
-                        onClick={() => {
-                          setEditing(row);
-                          setFormOpen(true);
-                        }}
-                      >
-                        <Pencil className="size-4" aria-hidden />
-                      </Button>
-                      <Button size="icon" variant="outline" aria-label="حذف" onClick={() => setDeleteTarget(row)}>
-                        <Trash2 className="size-4 text-destructive" aria-hidden />
-                      </Button>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+                      </td>
+                      {perms.canManageProducts && (
+                        <td className="px-3 py-2 text-center">
+                          <button
+                            type="button"
+                            onClick={() => void toggleActive(row)}
+                            className={`h-6 w-11 rounded-full transition-colors ${row.is_active ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
+                            aria-label="تفعيل / تعطيل"
+                          >
+                            <span
+                              className={`block size-5 rounded-full bg-white shadow transition-transform ${row.is_active ? "translate-x-0.5" : "translate-x-5"}`}
+                            />
+                          </button>
+                        </td>
+                      )}
+                      {perms.canManageProducts && (
+                        <td className="px-3 py-2">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="size-7"
+                              aria-label="تعديل"
+                              onClick={() => {
+                                setEditing(row);
+                                setFormOpen(true);
+                              }}
+                            >
+                              <Pencil className="size-3.5" aria-hidden />
+                            </Button>
+                            <Button size="icon" variant="outline" className="size-7" aria-label="حذف" onClick={() => setDeleteTarget(row)}>
+                              <Trash2 className="size-3.5 text-destructive" aria-hidden />
+                            </Button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
           {total > PAGE_SIZE && (
             <div className="flex items-center justify-between gap-3">

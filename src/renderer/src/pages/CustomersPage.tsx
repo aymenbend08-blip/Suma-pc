@@ -144,30 +144,39 @@ export function CustomersPage({ debtOnly = false }: { debtOnly?: boolean }) {
       ) : filtered.length === 0 ? (
         <p className="py-8 text-center text-sm text-muted-foreground">ما كاين زبائن</p>
       ) : (
-        <ul className="divide-y divide-border">
-          {filtered.map((c) => (
-            <li key={c.id} className="flex items-center gap-3 py-2.5">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{c.full_name}</p>
-                <p className="text-xs text-muted-foreground num" dir="ltr">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-[var(--primary)] text-[var(--primary-foreground)]">
+              <th className="rounded-s-lg px-3 py-2 text-start font-bold">الاسم</th>
+              <th className="px-3 py-2 text-start font-bold">الهاتف</th>
+              <th className="w-24 px-3 py-2 text-center font-bold">النقاط</th>
+              <th className="w-32 px-3 py-2 text-center font-bold">الدّين</th>
+              <th className="w-28 rounded-e-lg px-3 py-2 text-center font-bold">إجراء</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((c, i) => (
+              <tr key={c.id} className={`border-b border-border last:border-0 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}>
+                <td className="px-3 py-2 font-medium">{c.full_name}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
                   {c.phone}
-                </p>
-              </div>
-              <span className="text-xs text-muted-foreground">نقاط: {c.points_balance}</span>
-              <span
-                className={`text-sm font-bold num ${Number(c.credit_balance) > 0 ? "text-destructive" : ""}`}
-              >
-                {formatDA(c.credit_balance)}
-              </span>
-              {Number(c.credit_balance) > 0 && (
-                <Button variant="outline" size="sm" onClick={() => openPayDialog(c)}>
-                  <Wallet className="size-4" aria-hidden />
-                  تسديد
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
+                </td>
+                <td className="px-3 py-2 text-center text-xs text-muted-foreground num">{c.points_balance}</td>
+                <td className={`px-3 py-2 text-center font-bold num ${Number(c.credit_balance) > 0 ? "text-destructive" : ""}`}>
+                  {formatDA(c.credit_balance)}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {Number(c.credit_balance) > 0 && (
+                    <Button variant="outline" size="sm" onClick={() => openPayDialog(c)}>
+                      <Wallet className="size-4" aria-hidden />
+                      تسديد
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
 
       {payTarget && (
