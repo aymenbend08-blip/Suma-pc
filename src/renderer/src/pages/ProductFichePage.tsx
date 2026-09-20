@@ -1,11 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Plus, Printer, Trash2, Wand2, X } from "lucide-react";
+import { History, Loader2, Plus, Printer, Trash2, Wand2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import type { CategoryRow, ProductBarcodeRow, ProductRow } from "@/lib/database.types";
+import { adjustStock } from "@/lib/rpc";
+import { formatDA, formatDateTime } from "@/lib/format";
+import type {
+  CategoryRow,
+  ProductBarcodeRow,
+  ProductRow,
+  ProductVariantRow,
+  StockMovementRow,
+  SupplierRow,
+} from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+
+const REASON_LABEL: Record<string, string> = {
+  sale: "بيع",
+  return: "إرجاع",
+  purchase: "شراء",
+  manual: "تعديل يدوي",
+  stocktake: "جرد/تسوية",
+};
 
 const WEIGHT_UNITS = ["كغ", "غرام"];
 const MEASURE_UNITS = ["لتر", "مل", "متر", "علبة", "كرطونة", "باكيتة"];
@@ -103,6 +120,10 @@ export function ProductFichePage({
   const [extraBarcodes, setExtraBarcodes] = useState<ProductBarcodeRow[]>([]);
   const [newExtraBarcode, setNewExtraBarcode] = useState("");
 
+  const [recentMovements, setRecentMovements] = useState<StockMovementRow[]>([]);
+  const [variants, setVariants] = useState<ProductVariantRow[]>([]);
+  const [lastPurchase, setLastPurchase] = useState<{ supplierName: string | null; cost: number; date: string } | null>(null);
+
   const [pointsReward] = useState(product?.points_reward ?? 0);
   const [isActive, setIsActive] = useState(product?.is_active ?? true);
   const [saving, setSaving] = useState(false);
@@ -138,7 +159,11 @@ export function ProductFichePage({
   }
 
   useEffect(() => {
-    if (product) void loadExtraBarcodes(product.id);
+    if (!product) return;
+    void loadExtraBarcodes(product.id);
+    void loadRecentMovements(product.id);
+    void loadVariants(product.id);
+    void loadLastPurchase(product.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product?.id]);
 
@@ -150,6 +175,53 @@ export function ProductFichePage({
       .order("created_at");
     if (error) return toast.error(error.message);
     setExtraBarcodes(data ?? []);
+  }
+
+  /** Read-only "why did this change" trail, same source StockPage's own
+   * movement history dialog reads — just the 5 most recent, inline. */
+  async function loadRecentMovements(productId: string) {
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .select("*")
+      .eq("product_id", productId)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    if (error) return;
+    setRecentMovements(data ?? []);
+  }
+
+  /** Variants (product_variants) are a real, live SUMA Web feature Desktop
+   * doesn't manage yet — shown read-only here so a variant's own stock/
+   * barcode isn't invisible, without inventing variant CRUD in this pass. */
+  async function loadVariants(productId: string) {
+    const { data, error } = await supabase.from("product_variants").select("*").eq("product_id", productId).order("variant_name");
+    if (error) return;
+    setVariants(data ?? []);
+  }
+
+  /** Supplier + cost context for the most recent purchase receipt —
+   * purchase_price on the product row is already the received unit cost
+   * (receive_purchase_order sets it), so only the supplier name and date
+   * need a lookup, traced through the purchase movement's reference_id. */
+  async function loadLastPurchase(productId: string) {
+    const { data: movement } = await supabase
+      .from("stock_movements")
+      .select("reference_id, created_at")
+      .eq("product_id", productId)
+      .eq("reason", "purchase")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!movement) return;
+    let supplierName: string | null = null;
+    if (movement.reference_id) {
+      const { data: po } = await supabase.from("purchase_orders").select("supplier_id").eq("id", movement.reference_id).maybeSingle();
+      if (po?.supplier_id) {
+        const { data: supplier } = await supabase.from("suppliers").select("name").eq("id", po.supplier_id).maybeSingle();
+        supplierName = supplier?.name ?? null;
+      }
+    }
+    setLastPurchase({ supplierName, cost: Number(product?.purchase_price ?? 0), date: movement.created_at });
   }
 
   async function addExtraBarcode() {
@@ -231,7 +303,14 @@ export function ProductFichePage({
       }
     }
 
-    const payload = {
+    // stock_quantity is deliberately excluded from the UPDATE payload — see
+    // the delta step below. A brand-new product has no prior state to race
+    // against, so its initial quantity is a plain INSERT field like any
+    // other; an existing product's quantity is never written as an
+    // absolute value, only ever as a server-computed delta via
+    // adjust_stock (same rule the المخزون screen's own settle modal and
+    // quick +/- follow).
+    const basePayload = {
       store_id: storeId,
       name: trimmedName,
       barcode: trimmedBarcode,
@@ -243,7 +322,6 @@ export function ProductFichePage({
       purchase_price: purchasePrice.trim() ? Number(purchasePrice) : null,
       selling_price: selling,
       tax_rate: taxRate.trim() ? Number(taxRate) : null,
-      stock_quantity: stockQuantity.trim() ? Number(stockQuantity) : 0,
       low_stock_threshold: lowStockThreshold.trim() ? Number(lowStockThreshold) : 5,
       location_in_store: locationInStore.trim() || null,
       unit,
@@ -258,12 +336,38 @@ export function ProductFichePage({
 
     setSaving(true);
     const { data: savedRow, error } = product
-      ? await supabase.from("products").update(payload).eq("id", product.id).eq("store_id", storeId).select().single()
-      : await supabase.from("products").insert(payload).select().single();
+      ? await supabase.from("products").update(basePayload).eq("id", product.id).eq("store_id", storeId).select().single()
+      : await supabase.from("products").insert({ ...basePayload, stock_quantity: stockQuantity.trim() ? Number(stockQuantity) : 0 }).select().single();
+    if (error) {
+      setSaving(false);
+      return toast.error(mapProductError(error.message));
+    }
+
+    let finalRow = savedRow as ProductRow;
+    if (product) {
+      const newQty = stockQuantity.trim() ? Number(stockQuantity) : 0;
+      const delta = newQty - Number(product.stock_quantity);
+      if (Number.isFinite(delta) && delta !== 0) {
+        const { data: adjustedRow, error: adjustError } = await adjustStock({
+          _product_id: product.id,
+          _store_id: storeId,
+          _delta: delta,
+          _reason: "manual",
+          _reference_type: "product_fiche",
+        });
+        if (adjustError) {
+          setSaving(false);
+          toast.error(`تم حفظ بيانات المنتج، لكن تعذر تحديث الكمية: ${adjustError.message}`);
+          onSaved(finalRow);
+          return;
+        }
+        if (adjustedRow) finalRow = adjustedRow;
+      }
+    }
+
     setSaving(false);
-    if (error) return toast.error(mapProductError(error.message));
     toast.success(product ? "تم تحديث المنتج." : "تزاد المنتج بنجاح.");
-    onSaved(savedRow as ProductRow);
+    onSaved(finalRow);
   }
 
   function printLabels() {
@@ -404,6 +508,12 @@ export function ProductFichePage({
                 <div>
                   <Label htmlFor="f-stock">المخزون الحالي</Label>
                   <Input id="f-stock" type="number" step="0.01" value={stockQuantity} onChange={(e) => setStockQuantity(e.target.value)} />
+                  {product && Number.isFinite(Number(stockQuantity)) && Number(stockQuantity) !== Number(product.stock_quantity) && (
+                    <p className="mt-1 text-xs font-semibold text-[var(--primary)]">
+                      {Number(stockQuantity) > Number(product.stock_quantity) ? "+" : ""}
+                      {Number(stockQuantity) - Number(product.stock_quantity)} عند الحفظ — يُسجَّل كحركة مخزون
+                    </p>
+                  )}
                 </div>
                 <div>
                   <Label htmlFor="f-low">حد تنبيه المخزون</Label>
@@ -502,6 +612,69 @@ export function ProductFichePage({
               )}
             </div>
           </section>
+
+          {/* آخر الحركات والمشتريات — read-only, only meaningful once the
+              product actually exists and has history. */}
+          {product && (
+            <section className="surface overflow-hidden p-0">
+              <h2 className="flex items-center gap-2 bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">
+                <History className="size-4" aria-hidden />
+                آخر الحركات
+              </h2>
+              <div className="p-4">
+                {lastPurchase && (
+                  <div className="mb-3 rounded-lg bg-[var(--muted)] p-2.5 text-xs">
+                    <p className="font-semibold">آخر شراء</p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      {lastPurchase.supplierName ?? "بدون مورد"} — {formatDA(lastPurchase.cost)} — {formatDateTime(lastPurchase.date)}
+                    </p>
+                  </div>
+                )}
+                {recentMovements.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">ما كانش أي حركة مسجّلة لهذا المنتج بعد.</p>
+                ) : (
+                  <ul className="grid gap-1.5">
+                    {recentMovements.map((m) => (
+                      <li key={m.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="shrink-0 rounded-full bg-[var(--muted)] px-2 py-0.5 font-semibold">{REASON_LABEL[m.reason] ?? m.reason}</span>
+                        <span className="num text-muted-foreground">
+                          {m.quantity_before} ← {m.quantity_after} ({Number(m.delta) > 0 ? "+" : ""}
+                          {m.delta})
+                        </span>
+                        <span className="shrink-0 text-muted-foreground">{formatDateTime(m.created_at)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Variants (product_variants) — read-only: a real, live SUMA
+              Web feature this pass doesn't add management UI for, but a
+              variant's own stock/barcode shouldn't be invisible if some
+              already exist for this product. */}
+          {product && variants.length > 0 && (
+            <section className="surface overflow-hidden p-0">
+              <h2 className="bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">التنويعات (Variants)</h2>
+              <div className="p-4">
+                <ul className="grid gap-1.5">
+                  {variants.map((v) => (
+                    <li key={v.id} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-medium">{v.variant_name}</span>
+                      <span className="num text-muted-foreground" dir="ltr">
+                        {v.barcode ?? "—"}
+                      </span>
+                      <span className="num text-muted-foreground">{v.stock_quantity ?? product.stock_quantity}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  إدارة التنويعات (إضافة/تعديل) متوفرة على SUMA Web فقط حاليًا — معروضة هنا للاطلاع.
+                </p>
+              </div>
+            </section>
+          )}
 
           {/* الملصق والطباعة */}
           <section className="surface overflow-hidden p-0">

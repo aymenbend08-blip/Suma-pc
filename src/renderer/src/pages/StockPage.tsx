@@ -20,7 +20,7 @@ import { uuid } from "@/lib/uuid";
 import { adjustStock, applyStocktake, type AdjustStockArgs } from "@/lib/rpc";
 import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
-import { formatDate, formatDateTime } from "@/lib/format";
+import { formatDA, formatDate, formatDateTime } from "@/lib/format";
 import type {
   CategoryRow,
   ProductRow,
@@ -61,6 +61,17 @@ function isExpiringSoon(expiryDate: string | null): "expired" | "soon" | null {
   sevenAhead.setDate(sevenAhead.getDate() + 7);
   if (expiryDate <= sevenAhead.toISOString().slice(0, 10)) return "soon";
   return null;
+}
+
+function relativeTime(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "الآن";
+  if (minutes < 60) return `قبل ${minutes} د`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `قبل ${hours} س`;
+  const days = Math.floor(hours / 24);
+  return `قبل ${days} يوم`;
 }
 
 /**
@@ -121,6 +132,7 @@ export function StockPage() {
   const [settleTarget, setSettleTarget] = useState<ProductRow | null>(null);
   const [historyTarget, setHistoryTarget] = useState<ProductRow | null>(null);
   const [ficheTarget, setFicheTarget] = useState<ProductRow | null>(null);
+  const [lastMovementByProduct, setLastMovementByProduct] = useState<Record<string, StockMovementRow>>({});
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -180,6 +192,27 @@ export function StockPage() {
     if (error) return toast.error(error.message);
     setRows(data ?? []);
     setTotal(count ?? 0);
+    void loadLastMovements((data ?? []).map((r) => r.id));
+  }
+
+  /** One batched query for the "آخر حركة" hint under each visible row's
+   * name, instead of one query per row — reduced client-side to the
+   * single newest movement per product_id. */
+  async function loadLastMovements(productIds: string[]) {
+    if (productIds.length === 0) return setLastMovementByProduct({});
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .select("*")
+      .in("product_id", productIds)
+      .order("created_at", { ascending: false })
+      .limit(productIds.length * 5);
+    if (error) return;
+    const byProduct: Record<string, StockMovementRow> = {};
+    for (const m of data ?? []) {
+      if (!m.product_id) continue;
+      if (!byProduct[m.product_id]) byProduct[m.product_id] = m;
+    }
+    setLastMovementByProduct(byProduct);
   }
 
   useEffect(() => {
@@ -449,6 +482,7 @@ export function StockPage() {
                   <th className="px-3 py-2 text-start font-bold">المنتج</th>
                   <th className="px-3 py-2 text-start font-bold">الباركود / الكود</th>
                   <th className="px-3 py-2 text-start font-bold">التصنيف</th>
+                  <th className="w-24 px-3 py-2 text-end font-bold">السعر</th>
                   <th className="px-3 py-2 text-start font-bold">تاريخ الانتهاء</th>
                   <th className="w-40 px-3 py-2 text-center font-bold">الحالة</th>
                   <th className="w-40 px-3 py-2 text-center font-bold">الكمية</th>
@@ -461,6 +495,7 @@ export function StockPage() {
                   const low = row.is_low_stock;
                   const out = stock <= 0;
                   const expiry = isExpiringSoon(row.expiry_date);
+                  const lastMovement = lastMovementByProduct[row.id];
                   return (
                     <tr key={row.id} className={`border-b border-border last:border-0 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}>
                       <td className="px-3 py-2">
@@ -475,13 +510,21 @@ export function StockPage() {
                           ) : (
                             <div className="size-9 shrink-0 rounded-md bg-[var(--muted)]" />
                           )}
-                          <span className="truncate font-medium">{row.name}</span>
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">{row.name}</span>
+                            {lastMovement && (
+                              <span className="block text-[10px] text-muted-foreground">
+                                آخر حركة: {REASON_LABEL[lastMovement.reason] ?? lastMovement.reason} · {relativeTime(lastMovement.created_at)}
+                              </span>
+                            )}
+                          </span>
                         </button>
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
                         {[row.barcode, row.internal_code].filter(Boolean).join(" · ") || "—"}
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">{categoryName(row.category_id)}</td>
+                      <td className="px-3 py-2 text-end text-xs font-semibold num">{formatDA(row.selling_price)}</td>
                       <td className="px-3 py-2 text-xs">
                         {row.expiry_date ? (
                           <span className={`flex items-center gap-1 ${expiry === "expired" ? "font-semibold text-destructive" : "text-muted-foreground"}`}>
@@ -521,12 +564,26 @@ export function StockPage() {
                       <td className="px-3 py-2">
                         <div className="flex items-center justify-center gap-2">
                           {stocktakeMode ? (
-                            <Input
-                              type="number"
-                              value={stocktakeEdits[row.id] ?? String(stock)}
-                              onChange={(e) => setStocktakeEdits((prev) => ({ ...prev, [row.id]: e.target.value }))}
-                              className="h-8 w-20 text-center"
-                            />
+                            <div className="flex flex-col items-center gap-0.5">
+                              <Input
+                                type="number"
+                                value={stocktakeEdits[row.id] ?? String(stock)}
+                                onChange={(e) => setStocktakeEdits((prev) => ({ ...prev, [row.id]: e.target.value }))}
+                                className="h-8 w-20 text-center"
+                              />
+                              {(() => {
+                                const editVal = stocktakeEdits[row.id];
+                                if (editVal === undefined || editVal === "" || !Number.isFinite(Number(editVal))) return null;
+                                const diff = Number(editVal) - stock;
+                                if (diff === 0) return null;
+                                return (
+                                  <span className={`text-[10px] font-bold num ${diff > 0 ? "text-[var(--primary)]" : "text-destructive"}`}>
+                                    {diff > 0 ? "+" : ""}
+                                    {diff}
+                                  </span>
+                                );
+                              })()}
+                            </div>
                           ) : (
                             <>
                               <Button
@@ -539,15 +596,20 @@ export function StockPage() {
                               >
                                 <Minus className="size-3" aria-hidden />
                               </Button>
-                              <button
-                                type="button"
-                                onClick={() => setSettleTarget(row)}
-                                disabled={!isOnline}
-                                title={isOnline ? "تسوية الكمية الفعلية" : "تسوية الكمية تحتاج اتصالاً بالإنترنت"}
-                                className="w-12 text-center text-sm font-bold num disabled:cursor-not-allowed"
-                              >
-                                {stock} {row.unit}
-                              </button>
+                              <div className="flex flex-col items-center">
+                                <button
+                                  type="button"
+                                  onClick={() => setSettleTarget(row)}
+                                  disabled={!isOnline}
+                                  title={isOnline ? "تسوية الكمية الفعلية" : "تسوية الكمية تحتاج اتصالاً بالإنترنت"}
+                                  className="w-12 text-center text-sm font-bold num disabled:cursor-not-allowed"
+                                >
+                                  {stock} {row.unit}
+                                </button>
+                                {row.low_stock_threshold != null && (
+                                  <span className="text-[10px] text-muted-foreground num">الحد: {row.low_stock_threshold}</span>
+                                )}
+                              </div>
                               <Button
                                 variant="outline"
                                 size="icon"
@@ -685,6 +747,25 @@ function SettleModal({
             <Label htmlFor="counted">الكمية الفعلية</Label>
             <Input id="counted" type="number" min="0" value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
           </div>
+          {Number.isFinite(Number(value)) && Number(value) !== product.stock_quantity && (
+            <div className="rounded-lg bg-[var(--muted)] p-2.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">المتوقع (المسجَّل حاليًا)</span>
+                <span className="num font-semibold">{product.stock_quantity}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">المعدود (المُدخَل)</span>
+                <span className="num font-semibold">{Number(value)}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between border-t border-border pt-1">
+                <span className="font-semibold">الفرق</span>
+                <span className={`num font-bold ${Number(value) > product.stock_quantity ? "text-[var(--primary)]" : "text-destructive"}`}>
+                  {Number(value) > product.stock_quantity ? "+" : ""}
+                  {Number(value) - product.stock_quantity}
+                </span>
+              </div>
+            </div>
+          )}
           <div>
             <Label htmlFor="settle-note">ملاحظة (اختياري)</Label>
             <Input id="settle-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="سبب الفرق مثلاً" maxLength={200} />
@@ -734,6 +815,12 @@ function MovementHistoryDialog({ product, storeId, onClose }: { product: Product
     return members.find((m) => m.user_id === id)?.full_name ?? "مستخدم";
   }
 
+  function referenceLabel(referenceType: string | null): string | null {
+    if (!referenceType) return null;
+    const labels: Record<string, string> = { sale: "عملية بيع", purchase_order: "أمر شراء", stocktake_session: "جلسة جرد" };
+    return labels[referenceType] ?? referenceType;
+  }
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
       <div className="surface flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
@@ -760,6 +847,9 @@ function MovementHistoryDialog({ product, storeId, onClose }: { product: Product
                     </span>
                     <span className="text-muted-foreground">{userName(m.created_by)}</span>
                   </div>
+                  {referenceLabel(m.reference_type) && (
+                    <p className="mt-1 text-muted-foreground">المرجع: {referenceLabel(m.reference_type)}</p>
+                  )}
                   {m.notes && <p className="mt-1 text-muted-foreground">{m.notes}</p>}
                 </li>
               ))}

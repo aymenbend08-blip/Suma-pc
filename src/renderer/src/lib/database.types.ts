@@ -81,6 +81,21 @@ export type ProductRow = {
   label_size: string | null;
 };
 
+export type ProductVariantRow = {
+  id: string;
+  product_id: string;
+  store_id: string;
+  variant_name: string;
+  barcode: string | null;
+  selling_price: number | null;
+  stock_quantity: number | null;
+  image_url: string | null;
+  attributes: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ProductBarcodeRow = {
   id: string;
   product_id: string;
@@ -253,6 +268,7 @@ export type Database = {
       store_members: TableDef<StoreMemberRow>;
       products: TableDef<ProductRow>;
       product_barcodes: TableDef<ProductBarcodeRow>;
+      product_variants: TableDef<ProductVariantRow>;
       customers: TableDef<CustomerRow>;
       customer_payments: TableDef<CustomerPaymentRow>;
       expenses: TableDef<ExpenseRow>;

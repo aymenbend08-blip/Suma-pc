@@ -51,6 +51,7 @@ export function PurchasesPage({ openSuppliers }: { openSuppliers?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [itemsByOrder, setItemsByOrder] = useState<Record<string, PurchaseOrderItemRow[]>>({});
+  const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -107,6 +108,34 @@ export function PurchasesPage({ openSuppliers }: { openSuppliers?: boolean }) {
     setItemsByOrder((prev) => {
       const next = { ...prev };
       delete next[po.id];
+      return next;
+    });
+    void loadOrders();
+  }
+
+  /** Partial receiving — one line at a time, via receive_purchase_order's
+   * own _items param (already supported server-side, just never exposed
+   * in this UI). Stock updates and stock_movements logging happen exactly
+   * the same way "استلام الكل" already does, just scoped to one line. */
+  async function receiveOne(po: PurchaseOrderRow, item: PurchaseOrderItemRow) {
+    const remaining = Number(item.quantity) - Number(item.received_quantity);
+    const qty = Number(receiveQty[item.id] ?? remaining);
+    if (!Number.isFinite(qty) || qty <= 0) return toast.error("كمية استلام غير صالحة.");
+    if (qty > remaining) return toast.error("الكمية المطلوب استلامها أكبر من المتبقي.");
+    setBusyId(po.id);
+    const { error } = await receivePurchaseOrder({
+      _po_id: po.id,
+      _store_id: storeId,
+      _items: [{ purchase_order_item_id: item.id, quantity: qty }],
+    });
+    setBusyId(null);
+    if (error) return toast.error(error.message);
+    toast.success(`تم استلام ${qty} من ${item.product_name}.`);
+    const { data } = await supabase.from("purchase_order_items").select("*").eq("purchase_order_id", po.id);
+    setItemsByOrder((prev) => ({ ...prev, [po.id]: data ?? [] }));
+    setReceiveQty((prev) => {
+      const next = { ...prev };
+      delete next[item.id];
       return next;
     });
     void loadOrders();
@@ -202,15 +231,40 @@ export function PurchasesPage({ openSuppliers }: { openSuppliers?: boolean }) {
                           {items.length === 0 ? (
                             <p className="text-xs text-muted-foreground">جاري التحميل...</p>
                           ) : (
-                            <ul className="grid gap-1 text-xs">
-                              {items.map((it) => (
-                                <li key={it.id} className="flex items-center justify-between gap-2">
-                                  <span>{it.product_name}</span>
-                                  <span className="text-muted-foreground num">
-                                    {it.received_quantity} / {it.quantity} × {formatDA(it.unit_cost)}
-                                  </span>
-                                </li>
-                              ))}
+                            <ul className="grid gap-1.5 text-xs">
+                              {items.map((it) => {
+                                const remaining = Number(it.quantity) - Number(it.received_quantity);
+                                return (
+                                  <li key={it.id} className="flex items-center justify-between gap-2">
+                                    <span>{it.product_name}</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-muted-foreground num">
+                                        {it.received_quantity} / {it.quantity} × {formatDA(it.unit_cost)}
+                                      </span>
+                                      {perms.isAdmin && remaining > 0 && po.status !== "cancelled" && (
+                                        <>
+                                          <Input
+                                            type="number"
+                                            min="1"
+                                            max={remaining}
+                                            value={receiveQty[it.id] ?? String(remaining)}
+                                            onChange={(e) => setReceiveQty((prev) => ({ ...prev, [it.id]: e.target.value }))}
+                                            className="h-7 w-16 text-center text-xs"
+                                          />
+                                          <Button
+                                            size="sm"
+                                            className="h-7 px-2 text-[11px]"
+                                            disabled={busyId === po.id || !isOnline}
+                                            onClick={() => void receiveOne(po, it)}
+                                          >
+                                            استلم
+                                          </Button>
+                                        </>
+                                      )}
+                                    </div>
+                                  </li>
+                                );
+                              })}
                             </ul>
                           )}
                         </td>
@@ -236,7 +290,9 @@ export function PurchasesPage({ openSuppliers }: { openSuppliers?: boolean }) {
         />
       )}
 
-      {supplierDialogOpen && <SuppliersDialog storeId={storeId} suppliers={suppliers} onClose={() => setSupplierDialogOpen(false)} onChanged={loadSuppliers} />}
+      {supplierDialogOpen && (
+        <SuppliersDialog storeId={storeId} suppliers={suppliers} canWrite={perms.isAdmin} onClose={() => setSupplierDialogOpen(false)} onChanged={loadSuppliers} />
+      )}
     </div>
   );
 }
@@ -397,11 +453,13 @@ function CreatePurchaseOrderDialog({
 function SuppliersDialog({
   storeId,
   suppliers,
+  canWrite,
   onClose,
   onChanged,
 }: {
   storeId: string;
   suppliers: SupplierRow[];
+  canWrite: boolean;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -432,13 +490,17 @@ function SuppliersDialog({
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
       <div className="surface w-full max-w-md p-4" onClick={(e) => e.stopPropagation()}>
         <h2 className="mb-3 font-bold">الموردون</h2>
-        <div className="mb-4 flex gap-2">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="اسم المورد" className="flex-1" maxLength={80} />
-          <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="الهاتف" className="w-32" dir="ltr" />
-          <Button disabled={!name.trim() || creating} onClick={() => void create()}>
-            زيد
-          </Button>
-        </div>
+        {canWrite ? (
+          <div className="mb-4 flex gap-2">
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="اسم المورد" className="flex-1" maxLength={80} />
+            <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="الهاتف" className="w-32" dir="ltr" />
+            <Button disabled={!name.trim() || creating} onClick={() => void create()}>
+              زيد
+            </Button>
+          </div>
+        ) : (
+          <p className="mb-4 text-xs text-muted-foreground">إضافة أو تعديل الموردين محجوز لصاحب المحل أو المدير.</p>
+        )}
         <ul className="max-h-72 space-y-2 overflow-y-auto">
           {suppliers.length === 0 && <li className="py-4 text-center text-sm text-muted-foreground">ما كانش موردون بعد.</li>}
           {suppliers.map((s) => (
@@ -451,14 +513,20 @@ function SuppliersDialog({
                   </p>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => void toggle(s)}
-                className={`h-6 w-11 shrink-0 rounded-full transition-colors ${s.is_active ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
-                aria-label="تفعيل المورد"
-              >
-                <span className={`block size-5 rounded-full bg-white shadow transition-transform ${s.is_active ? "translate-x-0.5" : "translate-x-5"}`} />
-              </button>
+              {canWrite ? (
+                <button
+                  type="button"
+                  onClick={() => void toggle(s)}
+                  className={`h-6 w-11 shrink-0 rounded-full transition-colors ${s.is_active ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
+                  aria-label="تفعيل المورد"
+                >
+                  <span className={`block size-5 rounded-full bg-white shadow transition-transform ${s.is_active ? "translate-x-0.5" : "translate-x-5"}`} />
+                </button>
+              ) : (
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${s.is_active ? "bg-[var(--primary)]/10 text-[var(--primary)]" : "bg-[var(--muted)] text-muted-foreground"}`}>
+                  {s.is_active ? "مفعّل" : "معطّل"}
+                </span>
+              )}
             </li>
           ))}
         </ul>
