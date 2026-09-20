@@ -58,8 +58,8 @@ export type ProductRow = {
   description: string | null;
   barcode: string | null;
   internal_code: string | null;
-  purchase_price: number;
-  selling_price: number;
+  purchase_price: number | null;
+  selling_price: number | null;
   stock_quantity: number;
   low_stock_threshold: number | null;
   unit: string | null;

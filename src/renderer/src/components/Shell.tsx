@@ -26,7 +26,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useStore, type StorePermissions } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 
-export type Page = "home" | "pos" | "customers" | "dashboard" | "sync" | "coming-soon";
+export type Page = "home" | "pos" | "products" | "customers" | "dashboard" | "sync" | "coming-soon";
 
 export type NavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string };
 export type Navigate = (page: Page, opts?: NavOptions) => void;
@@ -70,9 +70,8 @@ function buildSections(failedCount: number): SidebarSection[] {
       key: "articles",
       label: "المنتجات",
       icon: Package,
-      visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "المنتجات" },
+      visible: (p) => p.canManageProducts,
+      page: "products",
     },
     {
       key: "stock",

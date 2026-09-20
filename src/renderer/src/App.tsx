@@ -7,6 +7,7 @@ import { supabaseConfigError } from "@/lib/supabase";
 import { LoginPage } from "@/pages/LoginPage";
 import { HomePage } from "@/pages/HomePage";
 import { POSPage } from "@/pages/POSPage";
+import { ProductsPage } from "@/pages/ProductsPage";
 import { CustomersPage } from "@/pages/CustomersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SyncQueuePage } from "@/pages/SyncQueuePage";
@@ -54,6 +55,7 @@ function AuthedApp() {
 
   const effectivePage: Page =
     (page === "pos" && !perms.canUsePos) ||
+    (page === "products" && !perms.canManageProducts) ||
     (page === "customers" && !perms.canManageCustomers) ||
     (page === "dashboard" && !perms.isAdmin) ||
     (page === "sync" && !perms.isAdmin)
@@ -65,6 +67,7 @@ function AuthedApp() {
       <Shell page={effectivePage} navOpts={navOpts} onNavigate={navigate}>
         {effectivePage === "home" && <HomePage onNavigate={navigate} />}
         {effectivePage === "pos" && perms.canUsePos && <POSPage autoOpenReturn={navOpts.autoOpenReturn} />}
+        {effectivePage === "products" && perms.canManageProducts && <ProductsPage />}
         {effectivePage === "customers" && perms.canManageCustomers && (
           <CustomersPage debtOnly={navOpts.debtOnly} />
         )}
