@@ -26,7 +26,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useStore, type StorePermissions } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 
-export type Page = "home" | "pos" | "products" | "customers" | "dashboard" | "sync" | "coming-soon";
+export type Page = "home" | "pos" | "products" | "stock" | "customers" | "dashboard" | "sync" | "coming-soon";
 
 export type NavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string };
 export type Navigate = (page: Page, opts?: NavOptions) => void;
@@ -50,11 +50,11 @@ type SidebarSection = {
  * in that reference at all, so it's appended after Paramètres rather than
  * dropped — it's a real, already-shipped Desktop feature.
  *
- * Sections with no Desktop feature behind them yet (Articles, Stock,
- * Achats, Fournisseurs, Caisse, Paramètres) route to the existing
- * ComingSoonPage via the "coming-soon" page + a title, same pattern
- * HomePage's own placeholder tiles already used — nothing new invented,
- * just reachable from a second place now.
+ * Sections with no Desktop feature behind them yet (Achats, Fournisseurs,
+ * Caisse, Paramètres) route to the existing ComingSoonPage via the
+ * "coming-soon" page + a title, same pattern HomePage's own placeholder
+ * tiles already used — nothing new invented, just reachable from a second
+ * place now.
  */
 function buildSections(failedCount: number): SidebarSection[] {
   return [
@@ -77,9 +77,8 @@ function buildSections(failedCount: number): SidebarSection[] {
       key: "stock",
       label: "المخزون",
       icon: Boxes,
-      visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "المخزون" },
+      visible: (p) => p.canManageProducts,
+      page: "stock",
     },
     {
       key: "achats",

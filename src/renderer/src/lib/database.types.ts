@@ -152,6 +152,26 @@ export type CategoryRow = {
   is_active: boolean;
 };
 
+export type StocktakeSessionRow = {
+  id: string;
+  store_id: string;
+  created_by: string | null;
+  notes: string | null;
+  line_count: number;
+  changed_count: number;
+  created_at: string;
+};
+
+export type StocktakeLineRow = {
+  id: string;
+  session_id: string;
+  product_id: string | null;
+  product_name: string;
+  previous_quantity: number;
+  counted_quantity: number;
+  delta: number;
+};
+
 type TableDef<Row> = {
   Row: Row;
   Insert: Partial<Row>;
@@ -171,6 +191,8 @@ export type Database = {
       sales: TableDef<SaleRow>;
       sale_items: TableDef<SaleItemRow>;
       categories: TableDef<CategoryRow>;
+      stocktake_sessions: TableDef<StocktakeSessionRow>;
+      stocktake_lines: TableDef<StocktakeLineRow>;
     };
     Views: Record<string, never>;
     Functions: {
@@ -194,6 +216,14 @@ export type Database = {
       pay_customer_credit: {
         Args: { _customer_id: string; _store_id: string; _amount: number };
         Returns: CustomerRow;
+      };
+      adjust_stock: {
+        Args: { _product_id: string; _store_id: string; _delta: number };
+        Returns: ProductRow;
+      };
+      apply_stocktake: {
+        Args: { _store_id: string; _lines: unknown; _notes?: string };
+        Returns: StocktakeSessionRow;
       };
     };
     Enums: Record<string, never>;
