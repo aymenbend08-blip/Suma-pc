@@ -3,9 +3,10 @@ import { BarChart3, Loader2, TrendingUp, Users, PackageX, Receipt, Wallet, Trend
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
 import { formatDA } from "@/lib/format";
+import { computeProfit } from "@/lib/profit";
 
 type MethodTotals = { cash: number; card: number; credit: number };
-type ProfitSummary = { revenue: number; cost: number; margin: number; expenses: number; netProfit: number };
+type ProfitSummary = { revenue: number; cost: number; margin: number; expenses: number; netProfit: number; unknownCostRevenue: number };
 
 /**
  * Real numbers, straight from Supabase (the same authenticated, RLS-scoped
@@ -35,7 +36,7 @@ export function DashboardPage() {
   const [byMethod, setByMethod] = useState<MethodTotals>({ cash: 0, card: 0, credit: 0 });
   const [totalDebt, setTotalDebt] = useState(0);
   const [lowStockCount, setLowStockCount] = useState(0);
-  const [profit, setProfit] = useState<ProfitSummary>({ revenue: 0, cost: 0, margin: 0, expenses: 0, netProfit: 0 });
+  const [profit, setProfit] = useState<ProfitSummary>({ revenue: 0, cost: 0, margin: 0, expenses: 0, netProfit: 0, unknownCostRevenue: 0 });
 
   useEffect(() => {
     let cancelled = false;
@@ -87,29 +88,24 @@ export function DashboardPage() {
       setTotalDebt((customersRes.data ?? []).reduce((sum, c) => sum + Number(c.credit_balance), 0));
       setLowStockCount(lowStockRes.count ?? 0);
 
-      let cost = 0;
       const saleIds = sales.map((s) => s.id);
+      let items: { product_id: string | null; quantity: number; refunded_quantity: number; unit_price: number }[] = [];
+      let products: { id: string; purchase_price: number | null }[] = [];
       if (saleIds.length > 0) {
-        const { data: items } = await supabase
+        const { data: itemsData } = await supabase
           .from("sale_items")
-          .select("product_id, quantity, refunded_quantity")
+          .select("product_id, quantity, refunded_quantity, unit_price")
           .in("sale_id", saleIds);
-        const productIds = Array.from(
-          new Set((items ?? []).map((i) => i.product_id).filter((id): id is string => id !== null)),
-        );
+        items = itemsData ?? [];
+        const productIds = Array.from(new Set(items.map((i) => i.product_id).filter((id): id is string => id !== null)));
         if (productIds.length > 0) {
-          const { data: products } = await supabase.from("products").select("id, purchase_price").in("id", productIds);
-          const costById = new Map((products ?? []).map((p) => [p.id, Number(p.purchase_price ?? 0)]));
-          for (const item of items ?? []) {
-            if (!item.product_id) continue;
-            const effectiveQty = Number(item.quantity) - Number(item.refunded_quantity);
-            cost += (costById.get(item.product_id) ?? 0) * Math.max(0, effectiveQty);
-          }
+          const { data: productsData } = await supabase.from("products").select("id, purchase_price").in("id", productIds);
+          products = productsData ?? [];
         }
       }
+      const { cost, margin, unknownCostRevenue } = computeProfit(sales, items, products);
       const expensesTotal = (expensesRes.data ?? []).reduce((sum, e) => sum + Number(e.amount), 0);
-      const margin = revenue - cost;
-      setProfit({ revenue, cost, margin, expenses: expensesTotal, netProfit: margin - expensesTotal });
+      setProfit({ revenue, cost, margin, expenses: expensesTotal, netProfit: margin - expensesTotal, unknownCostRevenue });
 
       setLoading(false);
     })();
@@ -208,6 +204,17 @@ export function DashboardPage() {
             <div className="my-1 border-t border-border" />
             <ProfitRow label="صافي الربح" value={profit.netProfit} bold large />
           </dl>
+          {profit.unknownCostRevenue > 0 && (
+            <div className="mt-3 rounded-lg border border-[var(--warning)]/40 bg-[var(--warning)]/10 p-2.5 text-[11px]">
+              <p className="font-semibold text-[var(--warning-foreground)]">
+                {formatDA(profit.unknownCostRevenue)} من المبيعات غير محتسبة ضمن الهامش أعلاه
+              </p>
+              <p className="mt-0.5 text-muted-foreground">
+                أصناف بلا تكلفة معروفة (بيعت بزر "أخرى" بدون منتج، أو منتج بلا سعر شراء مسجَّل) — تكلفتها الحقيقية
+                غير معروفة فلا نفترضها صفرًا ونعرضها كربح.
+              </p>
+            </div>
+          )}
           <p className="mt-3 text-[11px] text-muted-foreground">
             تكلفة البضاعة تقديرية بناءً على آخر سعر شراء مسجَّل لكل منتج، وليس السعر وقت البيع فعليًا — نفس طريقة
             الحساب المعتمدة في «تقرير المحاسبة» على SUMA Web.
