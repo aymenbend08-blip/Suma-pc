@@ -67,7 +67,7 @@ export function ProductFichePage({
   categories: CategoryRow[];
   initialBarcode?: string;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (row: ProductRow) => void;
 }) {
   const [name, setName] = useState(product?.name ?? "");
   const [internalCode, setInternalCode] = useState(product?.internal_code ?? "");
@@ -228,13 +228,13 @@ export function ProductFichePage({
     };
 
     setSaving(true);
-    const { error } = product
-      ? await supabase.from("products").update(payload).eq("id", product.id).eq("store_id", storeId)
-      : await supabase.from("products").insert(payload);
+    const { data: savedRow, error } = product
+      ? await supabase.from("products").update(payload).eq("id", product.id).eq("store_id", storeId).select().single()
+      : await supabase.from("products").insert(payload).select().single();
     setSaving(false);
     if (error) return toast.error(mapProductError(error.message));
     toast.success(product ? "تم تحديث المنتج." : "تزاد المنتج بنجاح.");
-    onSaved();
+    onSaved(savedRow as ProductRow);
   }
 
   function printLabels() {
@@ -252,16 +252,21 @@ export function ProductFichePage({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <header className="print:hidden flex items-center gap-3 border-b border-border px-4 py-3">
+    <>
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 print:hidden" onClick={onClose}>
+      <div
+        className="surface flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+      <header className="flex items-center gap-3 border-b border-border px-4 py-3">
         <h1 className="text-lg font-bold">{product ? "تعديل منتج" : "إضافة منتج"}</h1>
         <Button variant="ghost" size="icon" className="ms-auto" onClick={onClose} aria-label="إغلاق">
           <X className="size-5" aria-hidden />
         </Button>
       </header>
 
-      <div className="print:hidden flex-1 overflow-y-auto p-4">
-        <div className="mx-auto grid max-w-5xl gap-4 lg:grid-cols-2">
+      <div className="flex-1 overflow-y-auto p-4">
+        <div className="grid gap-4 lg:grid-cols-2">
           {/* الأساسية */}
           <section className="surface overflow-hidden p-0">
             <h2 className="bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">المعلومات الأساسية</h2>
@@ -553,7 +558,7 @@ export function ProductFichePage({
         </div>
       </div>
 
-      <footer className="print:hidden flex items-center gap-2 border-t border-border p-4">
+      <footer className="flex items-center gap-2 border-t border-border p-4">
         <Button variant="outline" className="flex-1" onClick={onClose}>
           إلغاء
         </Button>
@@ -562,19 +567,21 @@ export function ProductFichePage({
           حفظ المنتج
         </Button>
       </footer>
-
-      {/* Print-only label sheet — hidden on screen, shown only in @media print (styles.css) */}
-      <div className="hidden print:grid print:grid-cols-2 print:gap-2">
-        {Array.from({ length: labelPrintCount }, (_, i) => (
-          <div key={i} className="border border-black p-2 text-center">
-            <p className="text-xs font-bold">{name}</p>
-            <p className="text-[10px] num" dir="ltr">
-              {barcode || "—"}
-            </p>
-            <p className="text-sm font-black num">{sellingPrice ? `${sellingPrice} دج` : ""}</p>
-          </div>
-        ))}
       </div>
     </div>
+
+    {/* Print-only label sheet — hidden on screen, shown only in @media print (styles.css) */}
+    <div className="hidden print:grid print:grid-cols-2 print:gap-2">
+      {Array.from({ length: labelPrintCount }, (_, i) => (
+        <div key={i} className="border border-black p-2 text-center">
+          <p className="text-xs font-bold">{name}</p>
+          <p className="text-[10px] num" dir="ltr">
+            {barcode || "—"}
+          </p>
+          <p className="text-sm font-black num">{sellingPrice ? `${sellingPrice} دج` : ""}</p>
+        </div>
+      ))}
+    </div>
+    </>
   );
 }

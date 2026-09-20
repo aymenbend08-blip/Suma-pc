@@ -24,10 +24,13 @@ import { useAuth } from "@/context/AuthContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
 import { uuid } from "@/lib/uuid";
-import type { CustomerRow, ProductRow, SaleItemRow, SaleRow } from "@/lib/database.types";
+import type { CategoryRow, CustomerRow, ProductRow, SaleItemRow, SaleRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ProductFichePage } from "@/pages/ProductFichePage";
 import sumaLogo from "@/assets/suma-logo.png";
+
+const BARCODE_LIKE = /^[0-9]{6,}$/;
 
 type CartLine = {
   key: string;
@@ -75,7 +78,7 @@ function getSpeechRecognition(): any {
  * failing offline.
  */
 export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }) {
-  const { active } = useStore();
+  const { active, perms } = useStore();
   const { session } = useAuth();
   const { refreshPending, isOnline } = useSync();
   const storeId = active!.id;
@@ -113,6 +116,10 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
   const [customName, setCustomName] = useState("");
   const [customPrice, setCustomPrice] = useState("");
   const [customQty, setCustomQty] = useState("1");
+
+  const [showFiche, setShowFiche] = useState(false);
+  const [ficheBarcode, setFicheBarcode] = useState<string | undefined>(undefined);
+  const [ficheCategories, setFicheCategories] = useState<CategoryRow[]>([]);
 
   const [showReturn, setShowReturn] = useState(false);
   const [returnLoading, setReturnLoading] = useState(false);
@@ -237,7 +244,30 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     // also against the local mirror so a scan works offline too.
     const product = await localDb.findProductByBarcode(storeId, term);
     if (product) return addToCart(product);
+
+    // A barcode-shaped term that matched nothing at all — offer to add it
+    // as a new product right here, instead of just failing the scan.
+    // Creating a product is an online-only, admin-ish action (same
+    // reasoning as everywhere else catalog writes happen in this app), so
+    // this is gated on both permission and connectivity.
+    if (BARCODE_LIKE.test(term) && perms.canManageProducts && isOnline) {
+      void openFicheForBarcode(term);
+      return;
+    }
     toast.error("ما لقيناش منتج بهذا الباركود أو الاسم.");
+  }
+
+  async function openFicheForBarcode(barcode: string) {
+    if (ficheCategories.length === 0) {
+      const { data, error } = await supabase.from("categories").select("*").eq("store_id", storeId).order("sort_order");
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setFicheCategories(data ?? []);
+    }
+    setFicheBarcode(barcode);
+    setShowFiche(true);
   }
 
   function updateQuantity(key: string, delta: number) {
@@ -951,6 +981,28 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
           </div>
         </aside>
       </div>
+
+      {/* ---- Fiche Produit — opens as an overlay right on top of the POS
+          screen when a scanned barcode matches nothing, so adding the
+          missing product and getting straight back to the sale never
+          leaves this screen. ---- */}
+      {showFiche && (
+        <ProductFichePage
+          storeId={storeId}
+          product={null}
+          categories={ficheCategories}
+          initialBarcode={ficheBarcode}
+          onClose={() => {
+            setShowFiche(false);
+            setFicheBarcode(undefined);
+          }}
+          onSaved={(row) => {
+            setShowFiche(false);
+            setFicheBarcode(undefined);
+            addToCart(row);
+          }}
+        />
+      )}
 
       {/* ---- Custom no-barcode item dialog ---- */}
       {showCustomItem && (
