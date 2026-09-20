@@ -316,6 +316,7 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
   const d = getDb();
   const getProduct = d.prepare("SELECT * FROM products WHERE id = ?");
   const updateStock = d.prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?");
+  const addCredit = d.prepare("UPDATE customers SET credit_balance = credit_balance + ? WHERE id = ?");
   const insertSale = d.prepare(`
     INSERT INTO sales (id, store_id, cashier_id, cashier_name, total_amount, item_count, created_at,
       discount_amount, payment_method, refunded_amount, refunded_at, refunded_by, customer_id,
@@ -386,6 +387,15 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
       client_request_id: input.clientRequestId,
     });
     for (const row of lineRows) insertItem.run(row);
+
+    // A credit sale increases what the customer owes locally by the same
+    // delta record_sale() will apply server-side once this syncs — never
+    // an absolute overwrite, and part of the same transaction as the rest
+    // of the sale so the local mirror can't end up with the sale recorded
+    // but the debt missed (or vice versa) if something throws mid-way.
+    if (input.paymentMethod === "credit" && input.customerId) {
+      addCredit.run(totalAmount, input.customerId);
+    }
 
     // The price charged offline is frozen here (lineRows.unit_price, read
     // from the local mirror at THIS moment) and sent explicitly with the

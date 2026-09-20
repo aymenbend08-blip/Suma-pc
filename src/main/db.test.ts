@@ -196,6 +196,97 @@ describe("createLocalSale", () => {
     expect(payload._items[0].unit_price).toBe(300);
   });
 
+  it("increases the customer's local credit balance by the sale total, atomically with the rest of the sale", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 250 });
+    seedCustomer({ credit_balance: 1000 });
+
+    const result = db.createLocalSale({
+      id: "sale-credit-1",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: "كاشير",
+      items: [{ productId: "prod-1", quantity: 2 }],
+      discount: 0,
+      paymentMethod: "credit",
+      customerId: "cust-1",
+      clientRequestId: "req-credit-1",
+    });
+
+    expect(result.total_amount).toBe(500);
+
+    const customers = db.listCustomers("store-1") as { credit_balance: number }[];
+    expect(customers[0].credit_balance).toBe(1500); // 1000 + 500, delta-based
+
+    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    expect(product.stock_quantity).toBe(8); // stock still decremented as usual
+
+    const pending = db.listPendingSync();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].operation_type).toBe("record_sale");
+    const payload = JSON.parse(pending[0].payload) as { _customer_id: string; _payment_method: string };
+    expect(payload._customer_id).toBe("cust-1");
+    expect(payload._payment_method).toBe("credit");
+  });
+
+  it("does not touch customer credit for cash or card sales, even with a customer attached", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 250 });
+    seedCustomer({ credit_balance: 1000 });
+
+    db.createLocalSale({
+      id: "sale-cash-1",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1 }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: "cust-1",
+      clientRequestId: "req-cash-1",
+    });
+    db.createLocalSale({
+      id: "sale-card-1",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1 }],
+      discount: 0,
+      paymentMethod: "card",
+      customerId: "cust-1",
+      clientRequestId: "req-card-1",
+    });
+
+    const customers = db.listCustomers("store-1") as { credit_balance: number }[];
+    expect(customers[0].credit_balance).toBe(1000); // unchanged by cash/card sales
+  });
+
+  it("rolls back the credit-balance update along with the rest of the sale if an item is invalid", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 250 });
+    seedCustomer({ credit_balance: 1000 });
+
+    expect(() =>
+      db.createLocalSale({
+        id: "sale-credit-fail",
+        storeId: "store-1",
+        cashierId: "cashier-1",
+        cashierName: null,
+        items: [
+          { productId: "prod-1", quantity: 1 },
+          { productId: "does-not-exist", quantity: 1 },
+        ],
+        discount: 0,
+        paymentMethod: "credit",
+        customerId: "cust-1",
+        clientRequestId: "req-credit-fail",
+      }),
+    ).toThrow(/منتج غير معروف محليًا/);
+
+    const customers = db.listCustomers("store-1") as { credit_balance: number }[];
+    expect(customers[0].credit_balance).toBe(1000); // untouched — the whole transaction rolled back
+    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    expect(product.stock_quantity).toBe(10); // stock decrement for prod-1 rolled back too
+    expect(db.listPendingSync()).toHaveLength(0); // nothing enqueued either
+  });
+
   it("throws for a product unknown to the local mirror", () => {
     expect(() =>
       db.createLocalSale({

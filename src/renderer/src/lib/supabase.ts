@@ -16,6 +16,17 @@ export const supabaseConfigError = !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY
   ? "الإعدادات ناقصة: افتح ملف .env وتأكد من تعبئة VITE_SUPABASE_URL و VITE_SUPABASE_PUBLISHABLE_KEY."
   : null;
 
+/**
+ * Pinned explicitly (matches supabase-js's own default derivation:
+ * `sb-<project-ref>-auth-token`) so AuthContext can read the raw session
+ * straight out of localStorage under the exact same key the client
+ * itself persists it under — `GoTrueClient.storageKey` is `protected`
+ * and not reachable from outside the library.
+ */
+export const supabaseAuthStorageKey = SUPABASE_URL
+  ? `sb-${new URL(SUPABASE_URL).hostname.split(".")[0]}-auth-token`
+  : "sb-placeholder-auth-token";
+
 // Same project, same publishable (anon) key as SUMA Web — Desktop is just
 // another authenticated client of the same Supabase backend, protected by
 // the same RLS policies. Session persists to the renderer's localStorage
@@ -31,6 +42,7 @@ export const supabase: SupabaseClient<Database> = createClient<Database>(
   {
     auth: {
       storage: window.localStorage,
+      storageKey: supabaseAuthStorageKey,
       persistSession: true,
       autoRefreshToken: true,
     },

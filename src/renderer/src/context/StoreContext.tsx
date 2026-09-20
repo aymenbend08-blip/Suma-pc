@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
 import { localDb } from "@/lib/localdb";
-import { isNetworkError } from "@/lib/net";
+import { decideStoreLoad } from "@/lib/net";
 import type { StoreMemberRow, StoreRow } from "@/lib/database.types";
 import { useAuth } from "./AuthContext";
 
@@ -86,27 +86,37 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ]);
       if (cancelled) return;
 
-      // A network-shaped failure here means we're offline before any
-      // hydrate() cycle has ever primed the local SQLite mirror this
-      // session — e.g. the app opened with no Wi-Fi yet. Falling back to
-      // whatever was cached from the LAST time this device was online
-      // lets the cashier get into POS immediately instead of staring at
-      // an error screen; a real rejection (bad RLS, etc.) still surfaces.
-      if (storesRes.error && isNetworkError(storesRes.error.message)) {
+      // A network-shaped failure on EITHER query here means we're offline
+      // before any hydrate() cycle has ever primed the local SQLite mirror
+      // this session — e.g. the app opened with no Wi-Fi yet, or with an
+      // access token that expired while offline (which surfaces as an
+      // auth-shaped error like "JWT expired" rather than a fetch failure,
+      // but device.onLine being false still marks it offline-eligible —
+      // see isOfflineFallbackEligible). Falling back to whatever was
+      // cached from the LAST time this device was online lets the cashier
+      // get into POS immediately instead of staring at an error screen; a
+      // real rejection while genuinely connected still surfaces below.
+      const decision = decideStoreLoad(storesRes.error, membersRes.error);
+      if (decision.useCache) {
         const [localStores, localMembers] = await Promise.all([
           localDb.getStores(),
           localDb.getStoreMembers(userId),
         ]);
         if (cancelled) return;
         setOfflineFallback(true);
+        setError(null);
         setStores(localStores);
         setMemberships(localMembers);
         setLoading(false);
         return;
       }
 
+      // Neither error was offline-eligible: surface whichever one fired
+      // (stores or members) instead of silently letting a failed
+      // store_members fetch collapse permissions to an empty list — the
+      // same treatment the stores error already got before this fix.
       setOfflineFallback(false);
-      if (storesRes.error) setError(storesRes.error.message);
+      setError(decision.surfacedError);
       setStores(storesRes.data ?? []);
       setMemberships(membersRes.data ?? []);
       setLoading(false);
