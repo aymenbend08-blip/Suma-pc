@@ -1,15 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import {
-  AlertTriangle,
-  FolderPlus,
-  Loader2,
-  Pencil,
-  Plus,
-  Search,
-  Trash2,
-  Wand2,
-} from "lucide-react";
+import { AlertTriangle, FolderPlus, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
 import { formatDA } from "@/lib/format";
@@ -17,9 +8,10 @@ import type { CategoryRow, ProductRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ProductFichePage } from "@/pages/ProductFichePage";
 
-const UNITS = ["وحدة", "كغ", "غرام", "لتر", "مل", "علبة", "كرطونة", "متر", "باكيتة"];
 const PAGE_SIZE = 20;
+const BARCODE_LIKE = /^[0-9]{6,}$/;
 
 type FilterKind = "all" | "active" | "inactive" | "low_stock" | "out_of_stock" | "expiring_soon";
 
@@ -56,7 +48,13 @@ function mapProductError(message: string): string {
  * Also intentionally deferred, each its own sizable feature on Web: the
  * camera barcode scanner (a USB/keyboard-wedge scanner typing into the
  * barcode field already works, which is the normal Desktop setup anyway),
- * Excel export/import, and the product detail/price-history page.
+ * Excel export/import, and price/stock history.
+ *
+ * Add/edit now opens ProductFichePage — a full-screen "Fiche Produit"
+ * view, not the small dialog this started as (see that file). It also
+ * opens when a barcode search here matches nothing, with the scanned
+ * code prefilled, so scanning an unknown item is itself the "add it"
+ * flow.
  */
 export function ProductsPage() {
   const { active, perms } = useStore();
@@ -77,6 +75,7 @@ export function ProductsPage() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ProductRow | null>(null);
+  const [pendingBarcode, setPendingBarcode] = useState<string | undefined>(undefined);
   const [catOpen, setCatOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -206,6 +205,7 @@ export function ProductsPage() {
           <Button
             onClick={() => {
               setEditing(null);
+              setPendingBarcode(undefined);
               setFormOpen(true);
             }}
           >
@@ -302,7 +302,23 @@ export function ProductsPage() {
       {loading ? (
         <p className="py-8 text-center text-sm text-muted-foreground">جاري التحميل...</p>
       ) : rows.length === 0 ? (
-        <p className="surface py-8 text-center text-sm text-muted-foreground">ما كانش منتجات</p>
+        <div className="surface space-y-2 py-8 text-center text-sm text-muted-foreground">
+          <p>ما كانش منتجات</p>
+          {BARCODE_LIKE.test(debouncedSearch) && perms.canManageProducts && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setEditing(null);
+                setPendingBarcode(debouncedSearch);
+                setFormOpen(true);
+              }}
+            >
+              <Plus className="size-4" aria-hidden />
+              إضافة منتج جديد بهذا الباركود ({debouncedSearch})
+            </Button>
+          )}
+        </div>
       ) : (
         <>
           {/* A dense table, not a stacked card list — desktop has the width
@@ -379,6 +395,7 @@ export function ProductsPage() {
                               aria-label="تعديل"
                               onClick={() => {
                                 setEditing(row);
+                                setPendingBarcode(undefined);
                                 setFormOpen(true);
                               }}
                             >
@@ -430,17 +447,20 @@ export function ProductsPage() {
       )}
 
       {formOpen && (
-        <ProductFormDialog
+        <ProductFichePage
           storeId={storeId}
           product={editing}
           categories={categories}
+          initialBarcode={pendingBarcode}
           onClose={() => {
             setFormOpen(false);
             setEditing(null);
+            setPendingBarcode(undefined);
           }}
           onSaved={() => {
             setFormOpen(false);
             setEditing(null);
+            setPendingBarcode(undefined);
             void loadProducts();
           }}
         />
@@ -582,277 +602,3 @@ function CategoriesDialog({
   );
 }
 
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-};
-
-function ProductFormDialog({
-  storeId,
-  product,
-  categories,
-  onClose,
-  onSaved,
-}: {
-  storeId: string;
-  product: ProductRow | null;
-  categories: CategoryRow[];
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [name, setName] = useState(product?.name ?? "");
-  const [description, setDescription] = useState(product?.description ?? "");
-  const [barcode, setBarcode] = useState(product?.barcode ?? "");
-  const [internalCode, setInternalCode] = useState(product?.internal_code ?? "");
-  const [purchasePrice, setPurchasePrice] = useState(product?.purchase_price?.toString() ?? "");
-  const [sellingPrice, setSellingPrice] = useState(product?.selling_price?.toString() ?? "");
-  const [stockQuantity, setStockQuantity] = useState(product?.stock_quantity?.toString() ?? "0");
-  const [lowStockThreshold, setLowStockThreshold] = useState(product?.low_stock_threshold?.toString() ?? "5");
-  const [unit, setUnit] = useState(product?.unit ?? "وحدة");
-  const [categoryId, setCategoryId] = useState(product?.category_id ?? "");
-  const [expiryDate, setExpiryDate] = useState(product?.expiry_date ?? "");
-  const [pointsReward, setPointsReward] = useState(product?.points_reward?.toString() ?? "0");
-  const [isActive, setIsActive] = useState(product?.is_active ?? true);
-  const [imageUrl, setImageUrl] = useState<string | null>(product?.image_url ?? null);
-  const [uploadingImage, setUploadingImage] = useState(false);
-  const [generatingCode, setGeneratingCode] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const imageInputRef = useRef<HTMLInputElement | null>(null);
-
-  async function generateCode() {
-    setGeneratingCode(true);
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const code = `S${Math.floor(100000 + Math.random() * 900000)}`;
-      const { data: existing } = await supabase
-        .from("products")
-        .select("id")
-        .eq("store_id", storeId)
-        .eq("internal_code", code)
-        .maybeSingle();
-      if (!existing) {
-        setInternalCode(code);
-        setGeneratingCode(false);
-        return;
-      }
-    }
-    setGeneratingCode(false);
-    toast.error("ما قدرناش نولّدو كود داخلي، عاود المحاولة.");
-  }
-
-  async function handleImageFile(file: File) {
-    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-    const isImage = file.type.startsWith("image/") || ext in IMAGE_MIME_BY_EXT;
-    if (!isImage) return toast.error("لازم تختار صورة.");
-    if (file.size > 5 * 1024 * 1024) return toast.error("الصورة كبيرة برشا (أقصى 5 ميغا).");
-    setUploadingImage(true);
-    const path = `${storeId}/${crypto.randomUUID()}.${ext}`;
-    const { error } = await supabase.storage
-      .from("product-images")
-      .upload(path, file, { upsert: true, contentType: file.type || IMAGE_MIME_BY_EXT[ext] || "application/octet-stream" });
-    setUploadingImage(false);
-    if (error) return toast.error(error.message || "ما قدرناش نرفعو الصورة.");
-    const { data } = supabase.storage.from("product-images").getPublicUrl(path);
-    setImageUrl(data.publicUrl);
-  }
-
-  async function save() {
-    const trimmedName = name.trim();
-    if (!trimmedName) return toast.error("لازم اسم للمنتج.");
-    const selling = Number(sellingPrice);
-    if (!(selling >= 0)) return toast.error("سعر البيع لازم يكون رقم.");
-
-    const trimmedBarcode = barcode.trim() || null;
-    if (trimmedBarcode) {
-      const { data: aliasHit } = await supabase
-        .from("product_barcodes")
-        .select("product_id, products(name)")
-        .eq("store_id", storeId)
-        .eq("barcode", trimmedBarcode)
-        .neq("product_id", product?.id ?? "00000000-0000-0000-0000-000000000000")
-        .maybeSingle();
-      if (aliasHit) {
-        const otherName = (aliasHit as unknown as { products: { name: string } | null }).products?.name ?? "";
-        return toast.error(`هذا الباركود مستخدم بالفعل كباركود إضافي لمنتج آخر: ${otherName}.`);
-      }
-    }
-
-    const payload = {
-      store_id: storeId,
-      name: trimmedName,
-      description: description.trim() || null,
-      barcode: trimmedBarcode,
-      internal_code: internalCode.trim() || null,
-      purchase_price: purchasePrice.trim() ? Number(purchasePrice) : null,
-      selling_price: selling,
-      stock_quantity: stockQuantity.trim() ? Number(stockQuantity) : 0,
-      low_stock_threshold: lowStockThreshold.trim() ? Number(lowStockThreshold) : 5,
-      unit,
-      category_id: categoryId || null,
-      image_url: imageUrl,
-      points_reward: pointsReward.trim() ? Number(pointsReward) : 0,
-      is_active: isActive,
-      expiry_date: expiryDate.trim() || null,
-    };
-
-    setSaving(true);
-    const { error } = product
-      ? await supabase.from("products").update(payload).eq("id", product.id).eq("store_id", storeId)
-      : await supabase.from("products").insert(payload);
-    setSaving(false);
-    if (error) return toast.error(mapProductError(error.message));
-    toast.success(product ? "تم تحديث المنتج." : "تزاد المنتج بنجاح.");
-    onSaved();
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/40 p-4" onClick={onClose}>
-      <div className="surface my-8 w-full max-w-2xl p-4" onClick={(e) => e.stopPropagation()}>
-        <h2 className="mb-3 font-bold">{product ? "تعديل منتج" : "منتج جديد"}</h2>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <Label htmlFor="p-name">اسم المنتج *</Label>
-            <Input id="p-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={160} />
-          </div>
-
-          <div className="sm:col-span-2">
-            <Label htmlFor="p-desc">الوصف</Label>
-            <textarea
-              id="p-desc"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              maxLength={1000}
-              rows={2}
-              className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="p-barcode">Barcode</Label>
-            <Input id="p-barcode" value={barcode} onChange={(e) => setBarcode(e.target.value)} inputMode="numeric" placeholder="1234567890123" dir="ltr" />
-            <p className="mt-1 text-xs text-muted-foreground">الباركود فريد داخل محلك فقط — محل آخر يقدر يستعمل نفس الرقم.</p>
-          </div>
-
-          <div>
-            <Label htmlFor="p-code">الكود الداخلي</Label>
-            <div className="flex gap-2">
-              <Input id="p-code" value={internalCode} onChange={(e) => setInternalCode(e.target.value)} maxLength={40} dir="ltr" />
-              <Button type="button" variant="outline" disabled={generatingCode} onClick={() => void generateCode()}>
-                {generatingCode ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Wand2 className="size-4" aria-hidden />}
-              </Button>
-            </div>
-          </div>
-
-          <div>
-            <Label htmlFor="p-purchase">سعر الشراء (دج)</Label>
-            <Input id="p-purchase" type="number" step="0.01" min="0" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
-            <p className="mt-1 text-xs text-muted-foreground">ما يظهرش للزبون.</p>
-          </div>
-
-          <div>
-            <Label htmlFor="p-selling">سعر البيع (دج) *</Label>
-            <Input id="p-selling" type="number" step="0.01" min="0" value={sellingPrice} onChange={(e) => setSellingPrice(e.target.value)} />
-          </div>
-
-          <div>
-            <Label htmlFor="p-stock">الكمية</Label>
-            <Input id="p-stock" type="number" step="0.01" value={stockQuantity} onChange={(e) => setStockQuantity(e.target.value)} />
-          </div>
-
-          <div>
-            <Label htmlFor="p-low">حد المخزون الناقص</Label>
-            <Input id="p-low" type="number" step="1" min="0" value={lowStockThreshold} onChange={(e) => setLowStockThreshold(e.target.value)} />
-          </div>
-
-          <div>
-            <Label htmlFor="p-unit">الوحدة</Label>
-            <select id="p-unit" value={unit} onChange={(e) => setUnit(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
-              {UNITS.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <Label htmlFor="p-cat">التصنيف</Label>
-            <select id="p-cat" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
-              <option value="">بلا تصنيف</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="sm:col-span-2">
-            <Label>صورة المنتج</Label>
-            <div className="flex items-center gap-3">
-              <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-xl border border-dashed border-border bg-muted">
-                {imageUrl ? <img src={imageUrl} alt="" className="size-full object-cover" /> : <span className="text-[10px] text-muted-foreground">بلا صورة</span>}
-              </div>
-              <div className="flex flex-1 flex-col gap-2">
-                <input
-                  ref={imageInputRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) void handleImageFile(file);
-                  }}
-                />
-                <Button type="button" variant="outline" size="sm" disabled={uploadingImage} onClick={() => imageInputRef.current?.click()}>
-                  {uploadingImage ? "جاري الرفع..." : imageUrl ? "بدّل الصورة" : "ارفع صورة"}
-                </Button>
-                {imageUrl && (
-                  <button type="button" className="text-start text-xs text-destructive" onClick={() => setImageUrl(null)}>
-                    احذف الصورة
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <Label htmlFor="p-expiry">تاريخ الصلاحية</Label>
-            <Input id="p-expiry" type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
-            <p className="mt-1 text-xs text-muted-foreground">اختياري — لمنتجات كالألبان والخبز.</p>
-          </div>
-
-          <div>
-            <Label htmlFor="p-points">نقاط الوفاء</Label>
-            <Input id="p-points" type="number" min="0" step="1" value={pointsReward} onChange={(e) => setPointsReward(e.target.value)} />
-          </div>
-
-          <div className="flex items-center gap-3 pt-6">
-            <button
-              type="button"
-              onClick={() => setIsActive((v) => !v)}
-              className={`h-6 w-11 rounded-full transition-colors ${isActive ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
-              aria-label="المنتج مفعّل"
-            >
-              <span className={`block size-5 rounded-full bg-white shadow transition-transform ${isActive ? "translate-x-0.5" : "translate-x-5"}`} />
-            </button>
-            <Label>المنتج مفعّل</Label>
-          </div>
-        </div>
-
-        <div className="mt-4 flex gap-2">
-          <Button variant="outline" className="flex-1" onClick={onClose}>
-            إلغاء
-          </Button>
-          <Button className="flex-1" disabled={saving} onClick={() => void save()}>
-            {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            {product ? "حفظ التعديلات" : "زيد المنتج"}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}

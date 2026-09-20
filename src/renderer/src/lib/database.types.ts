@@ -71,6 +71,14 @@ export type ProductRow = {
   updated_at: string;
   is_low_stock: boolean;
   expiry_date: string | null;
+  brand: string | null;
+  product_type: string | null;
+  location_in_store: string | null;
+  tax_rate: number | null;
+  packaging: string | null;
+  specifications: string | null;
+  sizes: string | null;
+  label_size: string | null;
 };
 
 export type ProductBarcodeRow = {
