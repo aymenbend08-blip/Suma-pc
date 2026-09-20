@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { CustomerRow, SaleRow } from "./database.types";
+import type { CustomerRow, ProductRow, PurchaseOrderRow, SaleRow, StocktakeSessionRow } from "./database.types";
 
 /**
  * Thin, precisely-typed wrappers around the same Postgres RPCs SUMA Web
@@ -54,6 +54,77 @@ export type PayCustomerCreditArgs = {
 export async function payCustomerCredit(args: PayCustomerCreditArgs) {
   return supabase.rpc("pay_customer_credit" as never, args as never) as unknown as Promise<{
     data: CustomerRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/** Stock reasons mirror the stock_movements.reason CHECK constraint —
+ * keep in sync with the migration if that list ever changes. */
+export type StockMovementReason = "sale" | "return" | "purchase" | "manual" | "stocktake";
+
+export type AdjustStockArgs = {
+  _product_id: string;
+  _store_id: string;
+  _delta: number;
+  _reason?: StockMovementReason;
+  _reference_type?: string;
+  _reference_id?: string;
+  _notes?: string;
+  _client_request_id?: string;
+};
+
+export async function adjustStock(args: AdjustStockArgs) {
+  return supabase.rpc("adjust_stock" as never, args as never) as unknown as Promise<{
+    data: ProductRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type ApplyStocktakeArgs = {
+  _store_id: string;
+  _lines: Array<{ product_id: string; counted_quantity: number }>;
+  _notes?: string;
+};
+
+export async function applyStocktake(args: ApplyStocktakeArgs) {
+  return supabase.rpc("apply_stocktake" as never, args as never) as unknown as Promise<{
+    data: StocktakeSessionRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type CreatePurchaseOrderArgs = {
+  _store_id: string;
+  _items: Array<{ product_id?: string; product_name: string; quantity: number; unit_cost: number }>;
+  _supplier_id?: string;
+  _notes?: string;
+};
+
+export async function createPurchaseOrder(args: CreatePurchaseOrderArgs) {
+  return supabase.rpc("create_purchase_order" as never, args as never) as unknown as Promise<{
+    data: PurchaseOrderRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type ReceivePurchaseOrderArgs = {
+  _po_id: string;
+  _store_id: string;
+  _items?: Array<{ purchase_order_item_id: string; quantity: number }>;
+};
+
+export async function receivePurchaseOrder(args: ReceivePurchaseOrderArgs) {
+  return supabase.rpc("receive_purchase_order" as never, args as never) as unknown as Promise<{
+    data: PurchaseOrderRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type CancelPurchaseOrderArgs = { _po_id: string; _store_id: string };
+
+export async function cancelPurchaseOrder(args: CancelPurchaseOrderArgs) {
+  return supabase.rpc("cancel_purchase_order" as never, args as never) as unknown as Promise<{
+    data: PurchaseOrderRow | null;
     error: { message: string } | null;
   }>;
 }

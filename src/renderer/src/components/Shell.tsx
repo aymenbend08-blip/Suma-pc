@@ -26,9 +26,9 @@ import { useAuth } from "@/context/AuthContext";
 import { useStore, type StorePermissions } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 
-export type Page = "home" | "pos" | "products" | "stock" | "customers" | "dashboard" | "sync" | "coming-soon";
+export type Page = "home" | "pos" | "products" | "stock" | "purchases" | "customers" | "dashboard" | "sync" | "coming-soon";
 
-export type NavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string };
+export type NavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string; openSuppliers?: boolean };
 export type Navigate = (page: Page, opts?: NavOptions) => void;
 
 type SidebarSection = {
@@ -50,11 +50,16 @@ type SidebarSection = {
  * in that reference at all, so it's appended after Paramètres rather than
  * dropped — it's a real, already-shipped Desktop feature.
  *
- * Sections with no Desktop feature behind them yet (Achats, Fournisseurs,
- * Caisse, Paramètres) route to the existing ComingSoonPage via the
- * "coming-soon" page + a title, same pattern HomePage's own placeholder
- * tiles already used — nothing new invented, just reachable from a second
- * place now.
+ * Achats and Fournisseurs both route to the same PurchasesPage (suppliers
+ * are a dialog inside it, not a separate screen) — Fournisseurs opens
+ * straight into that dialog via navOpts.openSuppliers, keeping both
+ * reference sections as distinct, real sidebar entries rather than
+ * merging or dropping one.
+ *
+ * Sections with no Desktop feature behind them yet (Caisse, Paramètres)
+ * route to the existing ComingSoonPage via the "coming-soon" page + a
+ * title, same pattern HomePage's own placeholder tiles already used —
+ * nothing new invented, just reachable from a second place now.
  */
 function buildSections(failedCount: number): SidebarSection[] {
   return [
@@ -84,9 +89,8 @@ function buildSections(failedCount: number): SidebarSection[] {
       key: "achats",
       label: "المشتريات",
       icon: ShoppingBag,
-      visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "المشتريات" },
+      visible: (p) => p.canManageProducts,
+      page: "purchases",
     },
     {
       key: "clients",
@@ -99,9 +103,9 @@ function buildSections(failedCount: number): SidebarSection[] {
       key: "fournisseurs",
       label: "الموردون",
       icon: Truck,
-      visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "الموردون" },
+      visible: (p) => p.canManageProducts,
+      page: "purchases",
+      opts: { openSuppliers: true },
     },
     {
       key: "statistiques",
@@ -152,6 +156,7 @@ function isActive(section: SidebarSection, page: Page, opts: NavOptions): boolea
   if (section.page !== page) return false;
   if (page === "pos") return Boolean(section.opts?.autoOpenReturn) === Boolean(opts.autoOpenReturn);
   if (page === "coming-soon") return section.opts?.comingSoonTitle === opts.comingSoonTitle;
+  if (page === "purchases") return Boolean(section.opts?.openSuppliers) === Boolean(opts.openSuppliers);
   return true;
 }
 
@@ -168,7 +173,7 @@ export function Shell({
 }) {
   const { signOut, session } = useAuth();
   const { stores, active, select, perms } = useStore();
-  const { isOnline, pendingCount, failedCount, syncing, syncNow } = useSync();
+  const { isOnline, pendingCount, failedCount, syncing, lastSyncAt, syncNow } = useSync();
 
   const sections = buildSections(failedCount);
   const activeSection = sections.find((s) => isActive(s, page, navOpts));
@@ -231,7 +236,11 @@ export function Shell({
               explicit placeholders until their behavior is specified. */}
           <div className="flex items-center gap-1">
             <IconButton
-              title={isOnline ? "متصل — اضغط للمزامنة الآن" : "غير متصل — اضغط للمحاولة الآن"}
+              title={
+                isOnline
+                  ? `متصل — آخر مزامنة: ${lastSyncAt ? lastSyncAt.toLocaleTimeString("ar-DZ", { hour: "2-digit", minute: "2-digit" }) : "الآن"} — اضغط للمزامنة الآن`
+                  : "غير متصل — اضغط للمحاولة الآن"
+              }
               onClick={() => void syncNow()}
             >
               {syncing ? (

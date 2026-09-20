@@ -172,6 +172,63 @@ export type StocktakeLineRow = {
   delta: number;
 };
 
+export type StockMovementReason = "sale" | "return" | "purchase" | "manual" | "stocktake";
+
+export type StockMovementRow = {
+  id: string;
+  store_id: string;
+  product_id: string | null;
+  product_name: string;
+  delta: number;
+  quantity_before: number;
+  quantity_after: number;
+  reason: StockMovementReason;
+  reference_type: string | null;
+  reference_id: string | null;
+  notes: string | null;
+  created_by: string | null;
+  client_request_id: string | null;
+  created_at: string;
+};
+
+export type SupplierRow = {
+  id: string;
+  store_id: string;
+  name: string;
+  phone: string | null;
+  notes: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PurchaseOrderStatus = "draft" | "partially_received" | "received" | "cancelled";
+
+export type PurchaseOrderRow = {
+  id: string;
+  store_id: string;
+  supplier_id: string | null;
+  status: PurchaseOrderStatus;
+  notes: string | null;
+  total_cost: number;
+  created_by: string | null;
+  received_by: string | null;
+  received_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PurchaseOrderItemRow = {
+  id: string;
+  purchase_order_id: string;
+  product_id: string | null;
+  product_name: string;
+  quantity: number;
+  unit_cost: number;
+  line_total: number;
+  received_quantity: number;
+};
+
 type TableDef<Row> = {
   Row: Row;
   Insert: Partial<Row>;
@@ -193,6 +250,10 @@ export type Database = {
       categories: TableDef<CategoryRow>;
       stocktake_sessions: TableDef<StocktakeSessionRow>;
       stocktake_lines: TableDef<StocktakeLineRow>;
+      stock_movements: TableDef<StockMovementRow>;
+      suppliers: TableDef<SupplierRow>;
+      purchase_orders: TableDef<PurchaseOrderRow>;
+      purchase_order_items: TableDef<PurchaseOrderItemRow>;
     };
     Views: Record<string, never>;
     Functions: {
@@ -218,12 +279,33 @@ export type Database = {
         Returns: CustomerRow;
       };
       adjust_stock: {
-        Args: { _product_id: string; _store_id: string; _delta: number };
+        Args: {
+          _product_id: string;
+          _store_id: string;
+          _delta: number;
+          _reason?: StockMovementReason;
+          _reference_type?: string;
+          _reference_id?: string;
+          _notes?: string;
+          _client_request_id?: string;
+        };
         Returns: ProductRow;
       };
       apply_stocktake: {
         Args: { _store_id: string; _lines: unknown; _notes?: string };
         Returns: StocktakeSessionRow;
+      };
+      create_purchase_order: {
+        Args: { _store_id: string; _items: unknown; _supplier_id?: string; _notes?: string };
+        Returns: PurchaseOrderRow;
+      };
+      receive_purchase_order: {
+        Args: { _po_id: string; _store_id: string; _items?: unknown };
+        Returns: PurchaseOrderRow;
+      };
+      cancel_purchase_order: {
+        Args: { _po_id: string; _store_id: string };
+        Returns: PurchaseOrderRow;
       };
     };
     Enums: Record<string, never>;

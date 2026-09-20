@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CalendarClock,
   ClipboardList,
+  CloudOff,
   Download,
   History,
   Loader2,
@@ -13,12 +14,25 @@ import {
   XCircle,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { localDb } from "@/lib/localdb";
+import { isNetworkError } from "@/lib/net";
+import { uuid } from "@/lib/uuid";
+import { adjustStock, applyStocktake, type AdjustStockArgs } from "@/lib/rpc";
 import { useStore } from "@/context/StoreContext";
+import { useSync } from "@/context/SyncContext";
 import { formatDate, formatDateTime } from "@/lib/format";
-import type { CategoryRow, ProductRow, StocktakeLineRow, StocktakeSessionRow } from "@/lib/database.types";
+import type {
+  CategoryRow,
+  ProductRow,
+  StockMovementRow,
+  StocktakeLineRow,
+  StocktakeSessionRow,
+  StoreMemberRow,
+} from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ProductFichePage } from "@/pages/ProductFichePage";
 
 const PAGE_SIZE = 20;
 
@@ -31,26 +45,58 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "expiring_soon", label: "قرب الانتهاء" },
 ];
 
+const REASON_LABEL: Record<string, string> = {
+  sale: "بيع",
+  return: "إرجاع",
+  purchase: "شراء",
+  manual: "تعديل يدوي",
+  stocktake: "جرد/تسوية",
+};
+
+function isExpiringSoon(expiryDate: string | null): "expired" | "soon" | null {
+  if (!expiryDate) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  if (expiryDate < today) return "expired";
+  const sevenAhead = new Date();
+  sevenAhead.setDate(sevenAhead.getDate() + 7);
+  if (expiryDate <= sevenAhead.toISOString().slice(0, 10)) return "soon";
+  return null;
+}
+
 /**
  * A straight port of SUMA Web's المخزون screen (inventory.tsx) onto the
  * same RLS-scoped Supabase client every other Desktop screen uses —
- * same filters, same +/- quick-adjust and click-to-edit quantity, same
- * formal stocktake sessions (apply_stocktake RPC, logged in
- * stocktake_sessions/stocktake_lines exactly like Web). adjust_stock and
- * apply_stocktake are both already GRANT EXECUTE'd to `authenticated` and
- * apply_stocktake writes its own audit_logs row internally — unlike the
- * Products screen, there's no service-role-only side effect skipped here.
+ * same filters, same quick-adjust and stocktake sessions (apply_stocktake
+ * RPC, logged in stocktake_sessions/stocktake_lines exactly like Web).
  *
- * Two things deferred, same reasoning as the Products screen: the camera
- * barcode scanner (a keyboard-wedge USB scanner typing into the search
- * field already works) and Web's .xlsx export (done here as CSV instead,
- * so no new dependency is needed — same columns, opens fine in Excel).
+ * Every stock-changing action here (quick +/-, single-item settlement,
+ * full stocktake) goes through adjust_stock / apply_stocktake — both
+ * SECURITY DEFINER RPCs that also write a stock_movements row internally
+ * (see the stock_movements_ledger migration), so this screen never sends
+ * an absolute `stock_quantity = X` write itself. The click-to-edit
+ * absolute write this screen used to do was replaced by a single-item
+ * stocktake (same apply_stocktake call the bulk "جرد سريع" mode uses,
+ * just with one line) — same "I physically counted this" semantics, but
+ * expressed as a delta computed server-side under a row lock, never a
+ * raw overwrite a stale offline read could clobber.
+ *
+ * Offline behavior: the quick +/- buttons queue through the same local
+ * SQLite outbox POS's offline sales use (operation_type "adjust_stock"),
+ * so a cashier/owner correction made with no internet still applies
+ * immediately to the on-screen number and replays automatically once
+ * back online — never a lost update, since adjust_stock is a delta RPC
+ * with FOR UPDATE row locking, the same reasoning that already protects
+ * a phone sale and a Desktop sale of the same product at the same
+ * instant. Everything that needs a fresh, authoritative read against the
+ * whole catalog (full stocktake, movement history, the stocktake log,
+ * CSV export) requires being online, same as Products/Fiche Produit.
  *
  * List rendered as a dense desktop table, not Web's stacked card list —
  * same standing rule established for the Products/Customers screens.
  */
 export function StockPage() {
   const { active, perms } = useStore();
+  const { isOnline, pendingCount, refreshPending } = useSync();
   const storeId = active!.id;
 
   const [rows, setRows] = useState<ProductRow[]>([]);
@@ -64,8 +110,6 @@ export function StockPage() {
   const [categoryId, setCategoryId] = useState("");
   const [page, setPage] = useState(0);
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
   const [busy, setBusy] = useState(false);
 
   const [stocktakeMode, setStocktakeMode] = useState(false);
@@ -74,6 +118,9 @@ export function StockPage() {
 
   const [logOpen, setLogOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [settleTarget, setSettleTarget] = useState<ProductRow | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<ProductRow | null>(null);
+  const [ficheTarget, setFicheTarget] = useState<ProductRow | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -149,34 +196,45 @@ export function StockPage() {
     return categories.find((c) => c.id === id)?.name ?? "بلا تصنيف";
   }
 
-  // An atomic server-side delta (adjust_stock RPC), not a stale client
-  // read written back as an absolute value — a concurrent POS sale or a
-  // second click can't get silently overwritten.
-  async function step(id: string, delta: number) {
+  // An atomic server-side delta (adjust_stock RPC, row-locked), not a
+  // stale client read written back as an absolute value — a concurrent
+  // POS sale (from this same computer or from the phone app) or a second
+  // click can never be silently overwritten. If the request never
+  // reaches Supabase at all (offline), the same delta is queued locally
+  // and replayed later — exactly POS's own offline-sale fallback, just
+  // for a manual stock correction instead of a sale.
+  async function step(row: ProductRow, delta: number) {
     setBusy(true);
-    const { error } = await supabase.rpc("adjust_stock", { _product_id: id, _store_id: storeId, _delta: delta });
-    setBusy(false);
-    if (error) return toast.error(error.message);
-    void loadProducts();
-  }
-
-  function startEdit(id: string, current: number) {
-    setEditingId(id);
-    setEditValue(String(current));
-  }
-
-  async function saveEdit(id: string) {
-    setBusy(true);
-    const { error } = await supabase
-      .from("products")
-      .update({ stock_quantity: Number(editValue) || 0 })
-      .eq("id", id)
-      .eq("store_id", storeId);
-    setBusy(false);
-    if (error) return toast.error(error.message);
-    toast.success("تحدّث المخزون.");
-    setEditingId(null);
-    void loadProducts();
+    const { error } = await adjustStock({ _product_id: row.id, _store_id: storeId, _delta: delta, _reason: "manual" });
+    if (!error) {
+      setBusy(false);
+      void loadProducts();
+      return;
+    }
+    if (!isNetworkError(error.message)) {
+      setBusy(false);
+      toast.error(error.message);
+      return;
+    }
+    try {
+      const args: AdjustStockArgs = {
+        _product_id: row.id,
+        _store_id: storeId,
+        _delta: delta,
+        _reason: "manual",
+        _client_request_id: uuid(),
+      };
+      await localDb.enqueueOperation("adjust_stock", args);
+      setRows((prev) =>
+        prev.map((r) => (r.id === row.id ? { ...r, stock_quantity: Math.max(0, Number(r.stock_quantity) + delta) } : r)),
+      );
+      toast.success("تم التعديل (بدون إنترنت) — سيُزامن تلقائيًا عند عودة الاتصال.");
+      refreshPending();
+    } catch (localError) {
+      toast.error(localError instanceof Error ? localError.message : "تعذر حفظ التعديل حتى محليًا.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   const stocktakeChangedCount = Object.entries(stocktakeEdits).filter(([id, value]) => {
@@ -194,7 +252,7 @@ export function StockPage() {
     if (lines.length === 0) return;
 
     setSavingStocktake(true);
-    const { data: session, error } = await supabase.rpc("apply_stocktake", { _store_id: storeId, _lines: lines });
+    const { data: session, error } = await applyStocktake({ _store_id: storeId, _lines: lines });
     setSavingStocktake(false);
     if (error) return toast.error(error.message);
     const s = session as StocktakeSessionRow;
@@ -284,12 +342,14 @@ export function StockPage() {
           <p className="text-xs text-muted-foreground num">{total} منتج في محلك</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setLogOpen(true)}>
+          <Button variant="outline" disabled={!isOnline} title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined} onClick={() => setLogOpen(true)}>
             <History className="size-4" aria-hidden />
             سجل الجرد
           </Button>
           <Button
             variant={stocktakeMode ? "default" : "outline"}
+            disabled={!isOnline}
+            title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined}
             onClick={() => {
               setStocktakeMode((v) => !v);
               setStocktakeEdits({});
@@ -300,6 +360,17 @@ export function StockPage() {
           </Button>
         </div>
       </div>
+
+      {!isOnline && (
+        <div className="surface flex items-center gap-2 border-[var(--warning)]/40 bg-[var(--warning)]/10 p-3 text-xs">
+          <CloudOff className="size-4 shrink-0 text-[var(--warning-foreground)]" aria-hidden />
+          <p>
+            غير متصل — أزرار +/- تعمل وتُحفظ محليًا وتُزامَن تلقائيًا عند عودة الاتصال. الجرد الكامل، التسوية اليدوية،
+            سجل الجرد، والتصدير تحتاج اتصالاً بالإنترنت.
+            {pendingCount > 0 && ` (${pendingCount} عملية بانتظار المزامنة)`}
+          </p>
+        </div>
+      )}
 
       <div className="surface flex flex-wrap items-end gap-3 p-4">
         <div className="min-w-48 flex-1">
@@ -347,7 +418,7 @@ export function StockPage() {
             ))}
           </select>
         </div>
-        <Button variant="outline" disabled={exporting} onClick={() => void exportCsv()}>
+        <Button variant="outline" disabled={exporting || !isOnline} title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined} onClick={() => void exportCsv()}>
           {exporting ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Download className="size-4" aria-hidden />}
           {exporting ? "جاري التصدير..." : "تصدير"}
         </Button>
@@ -379,8 +450,9 @@ export function StockPage() {
                   <th className="px-3 py-2 text-start font-bold">الباركود / الكود</th>
                   <th className="px-3 py-2 text-start font-bold">التصنيف</th>
                   <th className="px-3 py-2 text-start font-bold">تاريخ الانتهاء</th>
-                  <th className="w-28 px-3 py-2 text-center font-bold">الحالة</th>
+                  <th className="w-40 px-3 py-2 text-center font-bold">الحالة</th>
                   <th className="w-40 px-3 py-2 text-center font-bold">الكمية</th>
+                  <th className="w-16 px-3 py-2 text-center font-bold">سجل</th>
                 </tr>
               </thead>
               <tbody>
@@ -388,18 +460,23 @@ export function StockPage() {
                   const stock = Number(row.stock_quantity);
                   const low = row.is_low_stock;
                   const out = stock <= 0;
-                  const expired = row.expiry_date ? row.expiry_date < new Date().toISOString().slice(0, 10) : false;
+                  const expiry = isExpiringSoon(row.expiry_date);
                   return (
                     <tr key={row.id} className={`border-b border-border last:border-0 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}>
                       <td className="px-3 py-2">
-                        <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="flex items-center gap-2 text-start hover:underline"
+                          title="فتح بطاقة المنتج"
+                          onClick={() => setFicheTarget(row)}
+                        >
                           {row.image_url ? (
                             <img src={row.image_url} alt="" className="size-9 shrink-0 rounded-md object-cover" />
                           ) : (
                             <div className="size-9 shrink-0 rounded-md bg-[var(--muted)]" />
                           )}
                           <span className="truncate font-medium">{row.name}</span>
-                        </div>
+                        </button>
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
                         {[row.barcode, row.internal_code].filter(Boolean).join(" · ") || "—"}
@@ -407,27 +484,39 @@ export function StockPage() {
                       <td className="px-3 py-2 text-xs text-muted-foreground">{categoryName(row.category_id)}</td>
                       <td className="px-3 py-2 text-xs">
                         {row.expiry_date ? (
-                          <span className={`flex items-center gap-1 ${expired ? "font-semibold text-destructive" : "text-muted-foreground"}`}>
+                          <span className={`flex items-center gap-1 ${expiry === "expired" ? "font-semibold text-destructive" : "text-muted-foreground"}`}>
                             <CalendarClock className="size-3" aria-hidden />
-                            {expired ? "انتهى: " : "ينتهي: "}
+                            {expiry === "expired" ? "انتهى: " : "ينتهي: "}
                             {formatDate(row.expiry_date)}
                           </span>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-center">
-                        {out ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-[var(--destructive)] px-2 py-0.5 text-[11px] font-bold text-white">
-                            <XCircle className="size-3" aria-hidden /> نفد
-                          </span>
-                        ) : low ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-[var(--warning)] px-2 py-0.5 text-[11px] font-bold text-[var(--warning-foreground)]">
-                            <AlertTriangle className="size-3" aria-hidden /> منخفض
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-[var(--primary)]/10 px-2 py-0.5 text-[11px] font-semibold text-[var(--primary)]">متوفر</span>
-                        )}
+                      <td className="px-3 py-2">
+                        <div className="flex flex-wrap items-center justify-center gap-1">
+                          {out ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--destructive)] px-2 py-0.5 text-[11px] font-bold text-white">
+                              <XCircle className="size-3" aria-hidden /> نفد
+                            </span>
+                          ) : low ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--warning)] px-2 py-0.5 text-[11px] font-bold text-[var(--warning-foreground)]">
+                              <AlertTriangle className="size-3" aria-hidden /> منخفض
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-[var(--primary)]/10 px-2 py-0.5 text-[11px] font-semibold text-[var(--primary)]">متوفر</span>
+                          )}
+                          {expiry && (
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                                expiry === "expired" ? "bg-[var(--destructive)]/10 text-destructive" : "bg-[var(--warning)]/20 text-[var(--warning-foreground)]"
+                              }`}
+                            >
+                              <CalendarClock className="size-3" aria-hidden />
+                              {expiry === "expired" ? "منتهي" : "قرب الانتهاء"}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex items-center justify-center gap-2">
@@ -438,19 +527,6 @@ export function StockPage() {
                               onChange={(e) => setStocktakeEdits((prev) => ({ ...prev, [row.id]: e.target.value }))}
                               className="h-8 w-20 text-center"
                             />
-                          ) : editingId === row.id ? (
-                            <>
-                              <Input
-                                type="number"
-                                value={editValue}
-                                onChange={(e) => setEditValue(e.target.value)}
-                                className="h-8 w-20 text-center"
-                                autoFocus
-                              />
-                              <Button size="sm" disabled={busy} onClick={() => void saveEdit(row.id)}>
-                                حفظ
-                              </Button>
-                            </>
                           ) : (
                             <>
                               <Button
@@ -458,15 +534,17 @@ export function StockPage() {
                                 size="icon"
                                 className="size-7"
                                 disabled={busy}
-                                onClick={() => void step(row.id, -1)}
+                                onClick={() => void step(row, -1)}
                                 aria-label="إنقاص"
                               >
                                 <Minus className="size-3" aria-hidden />
                               </Button>
                               <button
                                 type="button"
-                                onClick={() => startEdit(row.id, stock)}
-                                className="w-12 text-center text-sm font-bold num"
+                                onClick={() => setSettleTarget(row)}
+                                disabled={!isOnline}
+                                title={isOnline ? "تسوية الكمية الفعلية" : "تسوية الكمية تحتاج اتصالاً بالإنترنت"}
+                                className="w-12 text-center text-sm font-bold num disabled:cursor-not-allowed"
                               >
                                 {stock} {row.unit}
                               </button>
@@ -475,7 +553,7 @@ export function StockPage() {
                                 size="icon"
                                 className="size-7"
                                 disabled={busy}
-                                onClick={() => void step(row.id, 1)}
+                                onClick={() => void step(row, 1)}
                                 aria-label="زيادة"
                               >
                                 <Plus className="size-3" aria-hidden />
@@ -483,6 +561,18 @@ export function StockPage() {
                             </>
                           )}
                         </div>
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="size-7"
+                          disabled={!isOnline}
+                          title={isOnline ? "حركة هذا المنتج" : "يحتاج اتصالاً بالإنترنت"}
+                          onClick={() => setHistoryTarget(row)}
+                        >
+                          <History className="size-3.5" aria-hidden />
+                        </Button>
                       </td>
                     </tr>
                   );
@@ -512,6 +602,176 @@ export function StockPage() {
       )}
 
       {logOpen && <StocktakeLogDialog storeId={storeId} onClose={() => setLogOpen(false)} />}
+
+      {settleTarget && (
+        <SettleModal
+          product={settleTarget}
+          storeId={storeId}
+          onClose={() => setSettleTarget(null)}
+          onSaved={() => {
+            setSettleTarget(null);
+            void loadProducts();
+          }}
+        />
+      )}
+
+      {historyTarget && <MovementHistoryDialog product={historyTarget} storeId={storeId} onClose={() => setHistoryTarget(null)} />}
+
+      {ficheTarget && (
+        <ProductFichePage
+          storeId={storeId}
+          product={ficheTarget}
+          categories={categories}
+          onClose={() => setFicheTarget(null)}
+          onSaved={() => {
+            setFicheTarget(null);
+            void loadProducts();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Single-item stocktake — replaces the old "type an absolute number,
+ * write stock_quantity = X directly" edit. Goes through the exact same
+ * apply_stocktake RPC the bulk "جرد سريع" mode uses (one line instead of
+ * many): the server computes the delta itself under a row lock and logs
+ * it as a real stocktake movement, so a manual correction can never
+ * silently overwrite a sale that landed between the read and the write.
+ */
+function SettleModal({
+  product,
+  storeId,
+  onClose,
+  onSaved,
+}: {
+  product: ProductRow;
+  storeId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [value, setValue] = useState(String(product.stock_quantity));
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    const counted = Number(value);
+    if (!Number.isFinite(counted) || counted < 0) return toast.error("كمية غير صالحة.");
+    setSaving(true);
+    const { data, error } = await applyStocktake({
+      _store_id: storeId,
+      _lines: [{ product_id: product.id, counted_quantity: counted }],
+      _notes: note.trim() || undefined,
+    });
+    setSaving(false);
+    if (error) return toast.error(error.message);
+    const changed = (data as StocktakeSessionRow | null)?.changed_count ?? 0;
+    toast.success(changed > 0 ? `تم تصحيح الكمية إلى ${counted}.` : "الكمية المدخلة نفس الكمية الحالية — لا تغيير.");
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
+      <div className="surface w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
+        <h2 className="mb-1 font-bold">تسوية كمية: {product.name}</h2>
+        <p className="mb-3 text-xs text-muted-foreground">
+          الكمية المسجّلة حاليًا: <span className="num font-semibold">{product.stock_quantity}</span> {product.unit}. اكتب الكمية
+          الفعلية بعد العدّ اليدوي.
+        </p>
+        <div className="space-y-3">
+          <div>
+            <Label htmlFor="counted">الكمية الفعلية</Label>
+            <Input id="counted" type="number" min="0" value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
+          </div>
+          <div>
+            <Label htmlFor="settle-note">ملاحظة (اختياري)</Label>
+            <Input id="settle-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="سبب الفرق مثلاً" maxLength={200} />
+          </div>
+        </div>
+        <div className="mt-4 flex gap-2">
+          <Button variant="outline" className="flex-1" onClick={onClose}>
+            إلغاء
+          </Button>
+          <Button className="flex-1" disabled={saving} onClick={() => void save()}>
+            {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+            حفظ
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Full "why did this change" trail for one product — every sale,
+ * return, purchase receipt, manual adjustment, and stocktake line that
+ * ever touched its stock_quantity, newest first. */
+function MovementHistoryDialog({ product, storeId, onClose }: { product: ProductRow; storeId: string; onClose: () => void }) {
+  const [movements, setMovements] = useState<StockMovementRow[] | null>(null);
+  const [members, setMembers] = useState<StoreMemberRow[]>([]);
+
+  useEffect(() => {
+    void (async () => {
+      const [movementsRes, membersRes] = await Promise.all([
+        supabase
+          .from("stock_movements")
+          .select("*")
+          .eq("store_id", storeId)
+          .eq("product_id", product.id)
+          .order("created_at", { ascending: false })
+          .limit(50),
+        supabase.from("store_members").select("*").eq("store_id", storeId),
+      ]);
+      if (movementsRes.error) return toast.error(movementsRes.error.message);
+      setMovements(movementsRes.data ?? []);
+      setMembers(membersRes.data ?? []);
+    })();
+  }, [storeId, product.id]);
+
+  function userName(id: string | null): string {
+    if (!id) return "النظام";
+    return members.find((m) => m.user_id === id)?.full_name ?? "مستخدم";
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
+      <div className="surface flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-border p-4">
+          <h2 className="font-bold">حركة المخزون — {product.name}</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {movements === null ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">جاري التحميل...</p>
+          ) : movements.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">ما كانش أي حركة مسجّلة لهذا المنتج بعد.</p>
+          ) : (
+            <ul className="grid gap-2">
+              {movements.map((m) => (
+                <li key={m.id} className="rounded-xl border border-border p-2.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="rounded-full bg-[var(--muted)] px-2 py-0.5 font-semibold">{REASON_LABEL[m.reason] ?? m.reason}</span>
+                    <span className="text-muted-foreground">{formatDateTime(m.created_at)}</span>
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className="num">
+                      {m.quantity_before} ← {m.quantity_after} ({Number(m.delta) > 0 ? "+" : ""}
+                      {m.delta})
+                    </span>
+                    <span className="text-muted-foreground">{userName(m.created_by)}</span>
+                  </div>
+                  {m.notes && <p className="mt-1 text-muted-foreground">{m.notes}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="border-t border-border p-4">
+          <Button variant="outline" className="w-full" onClick={onClose}>
+            إغلاق
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

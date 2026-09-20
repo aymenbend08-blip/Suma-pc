@@ -9,6 +9,7 @@ import { HomePage } from "@/pages/HomePage";
 import { POSPage } from "@/pages/POSPage";
 import { ProductsPage } from "@/pages/ProductsPage";
 import { StockPage } from "@/pages/StockPage";
+import { PurchasesPage } from "@/pages/PurchasesPage";
 import { CustomersPage } from "@/pages/CustomersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SyncQueuePage } from "@/pages/SyncQueuePage";
@@ -58,6 +59,7 @@ function AuthedApp() {
     (page === "pos" && !perms.canUsePos) ||
     (page === "products" && !perms.canManageProducts) ||
     (page === "stock" && !perms.canManageProducts) ||
+    (page === "purchases" && !perms.canManageProducts) ||
     (page === "customers" && !perms.canManageCustomers) ||
     (page === "dashboard" && !perms.isAdmin) ||
     (page === "sync" && !perms.isAdmin)
@@ -71,6 +73,7 @@ function AuthedApp() {
         {effectivePage === "pos" && perms.canUsePos && <POSPage autoOpenReturn={navOpts.autoOpenReturn} />}
         {effectivePage === "products" && perms.canManageProducts && <ProductsPage />}
         {effectivePage === "stock" && perms.canManageProducts && <StockPage />}
+        {effectivePage === "purchases" && perms.canManageProducts && <PurchasesPage openSuppliers={navOpts.openSuppliers} />}
         {effectivePage === "customers" && perms.canManageCustomers && (
           <CustomersPage debtOnly={navOpts.debtOnly} />
         )}

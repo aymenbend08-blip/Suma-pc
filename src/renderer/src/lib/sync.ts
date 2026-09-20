@@ -1,6 +1,13 @@
 import { supabase } from "./supabase";
 import { localDb } from "./localdb";
-import { recordSale, payCustomerCredit, type RecordSaleArgs, type PayCustomerCreditArgs } from "./rpc";
+import {
+  recordSale,
+  payCustomerCredit,
+  adjustStock,
+  type RecordSaleArgs,
+  type PayCustomerCreditArgs,
+  type AdjustStockArgs,
+} from "./rpc";
 import { isNetworkError } from "./net";
 
 /**
@@ -63,6 +70,8 @@ export async function drainQueue(): Promise<DrainResult> {
       result = await recordSale(payload as RecordSaleArgs);
     } else if (item.operation_type === "pay_customer_credit") {
       result = await payCustomerCredit(payload as PayCustomerCreditArgs);
+    } else if (item.operation_type === "adjust_stock") {
+      result = await adjustStock(payload as AdjustStockArgs);
     } else {
       await localDb.markSyncFailed(item.id, `نوع عملية غير معروف: ${item.operation_type}`);
       failed += 1;

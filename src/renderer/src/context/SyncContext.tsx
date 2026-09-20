@@ -11,6 +11,7 @@ type SyncState = {
   pendingCount: number;
   failedCount: number;
   syncing: boolean;
+  lastSyncAt: Date | null;
   refreshPending: () => void;
   refreshFailed: () => void;
   syncNow: () => Promise<void>;
@@ -38,6 +39,7 @@ export function SyncProvider({
   const [pendingCount, setPendingCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
   const runningRef = useRef(false);
 
   async function refreshPending() {
@@ -68,8 +70,12 @@ export function SyncProvider({
       await refreshFailed();
 
       const hydrateResult = await hydrate(storeId, userId);
-      if (hydrateResult.ok) setIsOnline(true);
-      else if (drainResult.stoppedOffline || isNetworkError(hydrateResult.error)) setIsOnline(false);
+      if (hydrateResult.ok) {
+        setIsOnline(true);
+        setLastSyncAt(new Date());
+      } else if (drainResult.stoppedOffline || isNetworkError(hydrateResult.error)) {
+        setIsOnline(false);
+      }
     } finally {
       setSyncing(false);
       runningRef.current = false;
@@ -98,7 +104,7 @@ export function SyncProvider({
 
   return (
     <SyncContext.Provider
-      value={{ isOnline, pendingCount, failedCount, syncing, refreshPending, refreshFailed, syncNow: runCycle }}
+      value={{ isOnline, pendingCount, failedCount, syncing, lastSyncAt, refreshPending, refreshFailed, syncNow: runCycle }}
     >
       {children}
     </SyncContext.Provider>
