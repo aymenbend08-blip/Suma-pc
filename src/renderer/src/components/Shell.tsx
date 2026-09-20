@@ -206,10 +206,10 @@ export function Shell({
                   key={s.key}
                   type="button"
                   onClick={() => onNavigate(s.page, s.opts)}
-                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-start text-sm transition-colors ${
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-start text-sm transition-all ${
                     active
-                      ? "bg-[var(--primary)] font-bold text-[var(--primary-foreground)]"
-                      : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]"
+                      ? "bg-[var(--primary)] font-bold text-[var(--primary-foreground)] shadow-lift"
+                      : "text-[var(--sidebar-foreground)] hover:translate-x-[-2px] hover:bg-[var(--sidebar-accent)]"
                   }`}
                 >
                   <s.icon className="size-4 shrink-0" aria-hidden />

@@ -55,7 +55,7 @@ type RowProps = {
 export function SyncQueueRow({ item, variant, onRetry, onDismiss, busy }: RowProps) {
   const isFailed = variant === "failed";
   return (
-    <li className={`surface flex items-start gap-3 p-3 ${isFailed ? "border-destructive/40" : ""}`}>
+    <li className={`surface flex items-start gap-3 p-3 transition-shadow hover:shadow-lift ${isFailed ? "border-destructive/40" : ""}`}>
       <div className={`mt-0.5 rounded-full p-1.5 ${isFailed ? "bg-destructive/15 text-destructive" : "bg-warning/20 text-warning"}`}>
         {isFailed ? <AlertTriangle className="size-4" aria-hidden /> : <Clock className="size-4" aria-hidden />}
       </div>
@@ -146,8 +146,13 @@ export function SyncQueuePage() {
   return (
     <div className="space-y-4">
       <div className="surface p-4">
-        <h1 className="text-lg font-bold">متابعة المزامنة</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <span className="grid size-8 place-items-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
+            <RotateCcw className="size-4" aria-hidden />
+          </span>
+          <h1 className="text-lg font-bold">متابعة المزامنة</h1>
+        </div>
+        <p className="mt-2 text-sm text-muted-foreground">
           العمليات التي تمت بدون إنترنت وبانتظار المزامنة، والعمليات التي رفضها الخادم نهائيًا وتحتاج مراجعتك.
         </p>
       </div>
@@ -160,8 +165,10 @@ export function SyncQueuePage() {
         {loading ? (
           <p className="py-4 text-center text-sm text-muted-foreground">جاري التحميل...</p>
         ) : failed.length === 0 ? (
-          <p className="surface flex items-center gap-2 p-3 text-sm text-muted-foreground">
-            <Check className="size-4 text-success" aria-hidden />
+          <p className="surface flex items-center gap-2.5 p-3 text-sm text-muted-foreground">
+            <span className="grid size-7 place-items-center rounded-full bg-[var(--success)]/15 text-success">
+              <Check className="size-4" aria-hidden />
+            </span>
             لا توجد عمليات فاشلة حاليًا.
           </p>
         ) : (

@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  CalendarDays,
   RefreshCw,
   RotateCcw,
   Settings,
@@ -19,6 +20,7 @@ type Tile = {
   icon: typeof ShoppingCart;
   visible: boolean;
   badge?: number;
+  comingSoon?: boolean;
   onClick: () => void;
 };
 
@@ -83,6 +85,7 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
       label: "الموردون",
       icon: Truck,
       visible: perms.isAdmin,
+      comingSoon: true,
       onClick: () => onNavigate("coming-soon", { comingSoonTitle: "الموردون" }),
     },
     {
@@ -90,6 +93,7 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
       label: "المشتريات",
       icon: ShoppingBag,
       visible: perms.isAdmin,
+      comingSoon: true,
       onClick: () => onNavigate("coming-soon", { comingSoonTitle: "المشتريات" }),
     },
     {
@@ -97,17 +101,21 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
       label: "الإعدادات",
       icon: Settings,
       visible: perms.isAdmin,
+      comingSoon: true,
       onClick: () => onNavigate("coming-soon", { comingSoonTitle: "الإعدادات" }),
     },
   ];
 
   const visibleTiles = tiles.filter((t) => t.visible);
 
+  const greeting = new Date().getHours() < 12 ? "صباح الخير" : "مساء الخير";
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-black">مرحبًا بك في {active?.store_name}</h1>
-        <p className="text-sm text-muted-foreground">اختر من أين تريد أن تبدأ.</p>
+        <p className="text-sm font-medium text-[var(--primary)]">{greeting}</p>
+        <h1 className="text-2xl font-black tracking-tight">{active?.store_name}</h1>
+        <p className="mt-0.5 text-sm text-muted-foreground">اختر من أين تريد أن تبدأ.</p>
       </div>
 
       {visibleTiles.length === 0 ? (
@@ -121,15 +129,30 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
               key={t.key}
               type="button"
               onClick={t.onClick}
-              className="surface relative flex flex-col items-center gap-2 p-5 text-center transition-colors hover:bg-accent/10"
+              className={`surface surface-interactive group relative flex flex-col items-center gap-3 p-5 text-center ${
+                t.comingSoon ? "border-dashed" : ""
+              }`}
             >
               {!!t.badge && t.badge > 0 && (
                 <span className="absolute end-3 top-3 rounded-full bg-[var(--destructive)] px-1.5 text-[10px] font-bold text-white num">
                   {t.badge}
                 </span>
               )}
-              <t.icon className="size-7 text-[var(--primary)]" aria-hidden />
-              <span className="text-sm font-medium">{t.label}</span>
+              {t.comingSoon && (
+                <span className="absolute end-3 top-3 rounded-full bg-[var(--muted)] px-1.5 py-0.5 text-[9px] font-bold text-muted-foreground">
+                  قريبًا
+                </span>
+              )}
+              <span
+                className={`grid size-12 place-items-center rounded-xl transition-colors ${
+                  t.comingSoon
+                    ? "bg-[var(--muted)] text-muted-foreground"
+                    : "bg-[var(--primary)]/10 text-[var(--primary)] group-hover:bg-[var(--primary)] group-hover:text-[var(--primary-foreground)]"
+                }`}
+              >
+                <t.icon className="size-6" aria-hidden />
+              </span>
+              <span className="text-sm font-semibold">{t.label}</span>
             </button>
           ))}
         </div>
@@ -156,19 +179,26 @@ function MiniCalendar() {
 
   return (
     <div className="surface max-w-xs p-4">
-      <h2 className="mb-2 text-center text-sm font-bold">{monthName}</h2>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="grid size-7 place-items-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
+          <CalendarDays className="size-3.5" aria-hidden />
+        </span>
+        <h2 className="text-sm font-bold">{monthName}</h2>
+      </div>
       <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-muted-foreground">
         {weekDays.map((d) => (
-          <span key={d}>{d[0]}</span>
+          <span key={d} className="pb-1 font-medium">
+            {d[0]}
+          </span>
         ))}
         {cells.map((day, i) => (
           <span
             key={i}
-            className={`rounded-full py-1 num ${
+            className={`rounded-full py-1 num transition-colors ${
               day === today.getDate()
-                ? "bg-[var(--primary)] font-bold text-[var(--primary-foreground)]"
+                ? "bg-[var(--primary)] font-bold text-[var(--primary-foreground)] shadow-lift"
                 : day
-                  ? "text-foreground"
+                  ? "text-foreground hover:bg-[var(--muted)]"
                   : ""
             }`}
           >

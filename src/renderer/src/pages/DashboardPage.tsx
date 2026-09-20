@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, TrendingUp, Users, PackageX, Receipt } from "lucide-react";
+import { BarChart3, Loader2, TrendingUp, Users, PackageX, Receipt } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
 import { formatDA } from "@/lib/format";
@@ -101,8 +101,11 @@ export function DashboardPage() {
   ];
 
   return (
-    <div className="space-y-3">
-      <h1 className="text-lg font-bold">الإحصائيات</h1>
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-xl font-black tracking-tight">الإحصائيات</h1>
+        <p className="mt-0.5 text-sm text-muted-foreground">نظرة سريعة على أداء المحل اليوم.</p>
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile icon={TrendingUp} label="مبيعات اليوم" value={formatDA(todayTotal)} />
@@ -112,24 +115,29 @@ export function DashboardPage() {
       </div>
 
       <div className="surface p-4">
-        <h2 className="mb-3 text-sm font-bold text-muted-foreground">توزيع طرق الدفع اليوم</h2>
+        <div className="mb-4 flex items-center gap-2">
+          <span className="grid size-8 place-items-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
+            <BarChart3 className="size-4" aria-hidden />
+          </span>
+          <h2 className="text-sm font-bold">توزيع طرق الدفع اليوم</h2>
+        </div>
         {todayTotal === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">لا توجد مبيعات اليوم بعد</p>
         ) : (
-          <div className="space-y-2.5">
+          <div className="space-y-3">
             {bars.map((b) => (
               <div key={b.label} className="flex items-center gap-3">
-                <span className="w-14 shrink-0 text-xs text-muted-foreground">{b.label}</span>
-                <div className="h-5 flex-1 rounded-full bg-[var(--muted)]">
+                <span className="w-14 shrink-0 text-xs font-medium text-muted-foreground">{b.label}</span>
+                <div className="h-5 flex-1 overflow-hidden rounded-full bg-[var(--muted)]">
                   <div
-                    className="h-5 rounded-full"
+                    className="h-5 rounded-full transition-[width] duration-500 ease-out"
                     style={{
                       width: `${Math.max(2, (b.value / maxMethod) * 100)}%`,
                       backgroundColor: b.color,
                     }}
                   />
                 </div>
-                <span className="w-20 shrink-0 text-end text-xs font-medium num">{formatDA(b.value)}</span>
+                <span className="w-20 shrink-0 text-end text-xs font-bold num">{formatDA(b.value)}</span>
               </div>
             ))}
           </div>
@@ -151,14 +159,16 @@ function StatTile({
   tone?: "warn";
 }) {
   return (
-    <div className="surface p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Icon className="size-3.5" aria-hidden />
-        {label}
-      </div>
-      <div className={`mt-1 text-2xl font-black num ${tone === "warn" ? "text-[var(--warning-foreground)]" : ""}`}>
-        {value}
-      </div>
+    <div className="surface surface-interactive p-4">
+      <span
+        className={`grid size-9 place-items-center rounded-lg ${
+          tone === "warn" ? "bg-[var(--warning)]/20 text-[var(--warning-foreground)]" : "bg-[var(--primary)]/10 text-[var(--primary)]"
+        }`}
+      >
+        <Icon className="size-4.5" aria-hidden />
+      </span>
+      <div className="mt-2.5 text-xs text-muted-foreground">{label}</div>
+      <div className={`text-2xl font-black num ${tone === "warn" ? "text-[var(--warning-foreground)]" : ""}`}>{value}</div>
     </div>
   );
 }

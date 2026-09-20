@@ -140,6 +140,25 @@
   box-shadow: var(--shadow-soft);
 }
 
+@utility shadow-lift {
+  box-shadow: var(--shadow-lift);
+}
+
+/* A restrained hover lift for interactive cards (Home tiles, stat cards) —
+   just enough motion to read as "clickable", never bouncy or playful. */
+@utility surface-interactive {
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lift);
+    border-color: oklch(0.47 0.089 176 / 0.35);
+  }
+}
+
 @utility hero-gradient {
   background-image: radial-gradient(
       120% 80% at 100% 0%,

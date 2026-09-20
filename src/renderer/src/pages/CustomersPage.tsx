@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Wallet } from "lucide-react";
+import { Loader2, Users, Wallet } from "lucide-react";
 import { payCustomerCredit } from "@/lib/rpc";
 import { localDb } from "@/lib/localdb";
 import { isNetworkError } from "@/lib/net";
@@ -53,6 +53,11 @@ export function CustomersPage({ debtOnly = false }: { debtOnly?: boolean }) {
       if (!term) return true;
       return c.full_name.toLowerCase().includes(term) || c.phone.includes(term);
     });
+
+  function initials(name: string): string {
+    const parts = name.trim().split(/\s+/);
+    return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase();
+  }
 
   function openPayDialog(c: CustomerRow) {
     setPayTarget(c);
@@ -122,7 +127,10 @@ export function CustomersPage({ debtOnly = false }: { debtOnly?: boolean }) {
 
   return (
     <div className="surface p-4">
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-4 flex items-center gap-2">
+        <span className="grid size-8 place-items-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
+          <Users className="size-4" aria-hidden />
+        </span>
         <h1 className="text-lg font-bold">{showDebtOnly ? "تسديد ديون الزبائن" : "الزبائن"}</h1>
         <Button
           variant={showDebtOnly ? "default" : "outline"}
@@ -156,8 +164,18 @@ export function CustomersPage({ debtOnly = false }: { debtOnly?: boolean }) {
           </thead>
           <tbody>
             {filtered.map((c, i) => (
-              <tr key={c.id} className={`border-b border-border last:border-0 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}>
-                <td className="px-3 py-2 font-medium">{c.full_name}</td>
+              <tr
+                key={c.id}
+                className={`border-b border-border transition-colors last:border-0 hover:bg-[var(--accent)]/10 ${i % 2 === 1 ? "bg-[var(--muted)]" : "bg-white"}`}
+              >
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-full bg-[var(--primary)]/10 text-[11px] font-bold text-[var(--primary)]">
+                      {initials(c.full_name)}
+                    </span>
+                    <span className="font-medium">{c.full_name}</span>
+                  </div>
+                </td>
                 <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
                   {c.phone}
                 </td>
