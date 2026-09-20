@@ -108,6 +108,35 @@ export function ProductFichePage({
   const [saving, setSaving] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Drag-to-move: the panel starts centered (its natural grid position) and
+  // this offset is layered on top via a transform — dragging never fights
+  // the centering, it just displaces it. Reset to (0, 0) for free since the
+  // whole component remounts every time the modal opens (conditional render
+  // in the parent), so a dragged position never leaks into the next open.
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const dragStateRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      const drag = dragStateRef.current;
+      if (!drag) return;
+      setDragOffset({ x: drag.origX + (e.clientX - drag.startX), y: drag.origY + (e.clientY - drag.startY) });
+    }
+    function onMouseUp() {
+      dragStateRef.current = null;
+    }
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
+
+  function startDrag(e: React.MouseEvent) {
+    dragStateRef.current = { startX: e.clientX, startY: e.clientY, origX: dragOffset.x, origY: dragOffset.y };
+  }
+
   useEffect(() => {
     if (product) void loadExtraBarcodes(product.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -256,9 +285,14 @@ export function ProductFichePage({
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 print:hidden" onClick={onClose}>
       <div
         className="surface flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden"
+        style={{ transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }}
         onClick={(e) => e.stopPropagation()}
       >
-      <header className="flex items-center gap-3 border-b border-border px-4 py-3">
+      <header
+        className="flex cursor-move select-none items-center gap-3 border-b border-border px-4 py-3"
+        onMouseDown={startDrag}
+        title="اسحب لتحريك النافذة"
+      >
         <h1 className="text-lg font-bold">{product ? "تعديل منتج" : "إضافة منتج"}</h1>
         <Button variant="ghost" size="icon" className="ms-auto" onClick={onClose} aria-label="إغلاق">
           <X className="size-5" aria-hidden />
