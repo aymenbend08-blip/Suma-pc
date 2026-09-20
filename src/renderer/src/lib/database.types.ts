@@ -104,6 +104,16 @@ export type CustomerRow = {
   created_at: string;
 };
 
+export type ExpenseRow = {
+  id: string;
+  store_id: string;
+  amount: number;
+  description: string;
+  expense_date: string;
+  created_by: string | null;
+  created_at: string;
+};
+
 export type CustomerPaymentRow = {
   id: string;
   store_id: string;
@@ -245,6 +255,7 @@ export type Database = {
       product_barcodes: TableDef<ProductBarcodeRow>;
       customers: TableDef<CustomerRow>;
       customer_payments: TableDef<CustomerPaymentRow>;
+      expenses: TableDef<ExpenseRow>;
       sales: TableDef<SaleRow>;
       sale_items: TableDef<SaleItemRow>;
       categories: TableDef<CategoryRow>;
