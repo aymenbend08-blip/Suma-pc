@@ -138,6 +138,32 @@ export type CustomerPaymentRow = {
   created_at: string;
 };
 
+/**
+ * Register (cash drawer) sessions — live on the shared Supabase project
+ * since SUMA Web's 20260918170000_register_sessions.sql migration.
+ * Written ONLY through the open_register()/close_register() SECURITY
+ * DEFINER RPCs (register_sessions has no INSERT/UPDATE policy of its own,
+ * only a member-read SELECT policy) — never insert/update this table
+ * directly from the client.
+ */
+export type RegisterSessionStatus = "open" | "closed";
+
+export type RegisterSessionRow = {
+  id: string;
+  store_id: string;
+  opened_by: string | null;
+  opened_by_name: string | null;
+  opening_balance: number;
+  status: RegisterSessionStatus;
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+  expected_cash: number | null;
+  counted_cash: number | null;
+  variance: number | null;
+  notes: string | null;
+};
+
 export type SaleRow = {
   id: string;
   store_id: string;
@@ -273,6 +299,7 @@ export type Database = {
       customers: TableDef<CustomerRow>;
       customer_payments: TableDef<CustomerPaymentRow>;
       expenses: TableDef<ExpenseRow>;
+      register_sessions: TableDef<RegisterSessionRow>;
       sales: TableDef<SaleRow>;
       sale_items: TableDef<SaleItemRow>;
       categories: TableDef<CategoryRow>;
@@ -335,6 +362,18 @@ export type Database = {
       cancel_purchase_order: {
         Args: { _po_id: string; _store_id: string };
         Returns: PurchaseOrderRow;
+      };
+      open_register: {
+        Args: { _store_id: string; _opening_balance?: number; _notes?: string };
+        Returns: RegisterSessionRow;
+      };
+      close_register: {
+        Args: { _session_id: string; _store_id: string; _counted_cash: number; _notes?: string };
+        Returns: RegisterSessionRow;
+      };
+      add_item_to_sale: {
+        Args: { _sale_id: string; _store_id: string; _product_id: string; _quantity: number };
+        Returns: SaleRow;
       };
     };
     Enums: Record<string, never>;

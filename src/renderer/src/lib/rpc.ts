@@ -1,5 +1,12 @@
 import { supabase } from "./supabase";
-import type { CustomerRow, ProductRow, PurchaseOrderRow, SaleRow, StocktakeSessionRow } from "./database.types";
+import type {
+  CustomerRow,
+  ProductRow,
+  PurchaseOrderRow,
+  RegisterSessionRow,
+  SaleRow,
+  StocktakeSessionRow,
+} from "./database.types";
 
 /**
  * Thin, precisely-typed wrappers around the same Postgres RPCs SUMA Web
@@ -130,6 +137,53 @@ export type CancelPurchaseOrderArgs = { _po_id: string; _store_id: string };
 export async function cancelPurchaseOrder(args: CancelPurchaseOrderArgs) {
   return supabase.rpc("cancel_purchase_order" as never, args as never) as unknown as Promise<{
     data: PurchaseOrderRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/**
+ * Cash register (register_sessions) — same open_register()/close_register()
+ * SECURITY DEFINER RPCs SUMA Web's cash-report screen already calls
+ * (20260918170000_register_sessions.sql). Both are explicitly online-only:
+ * a register session is a single, authoritative, cross-device fact ("is the
+ * drawer open right now") that can never be queued offline without risking
+ * two devices both believing they opened it — callers must check
+ * `isOnline` themselves and disable the action instead of queuing it.
+ *
+ * NOTE (known, pre-existing server-side bug — do not "fix" client-side by
+ * guessing): close_register() computes its own `expected_cash` by summing
+ * `sales.created_at` (sync time) instead of `sales.occurred_at` (the real
+ * sale moment), so an offline sale that synced on a later day gets
+ * attributed to the wrong register session/day in that ONE stored number.
+ * CashRegisterPage computes its own independent expected total keyed on
+ * occurred_at (see lib/cashreport.ts) and shows both side by side so the
+ * report stays self-consistent even when the RPC's own figure is skewed.
+ */
+export type OpenRegisterArgs = { _store_id: string; _opening_balance?: number; _notes?: string };
+
+export async function openRegister(args: OpenRegisterArgs) {
+  return supabase.rpc("open_register" as never, args as never) as unknown as Promise<{
+    data: RegisterSessionRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type CloseRegisterArgs = { _session_id: string; _store_id: string; _counted_cash: number; _notes?: string };
+
+export async function closeRegister(args: CloseRegisterArgs) {
+  return supabase.rpc("close_register" as never, args as never) as unknown as Promise<{
+    data: RegisterSessionRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/** Adds a forgotten line item to an already-recorded sale — used by Sales
+ * History's "إضافة صنف منسي" action. Online-only (no offline mirror). */
+export type AddItemToSaleArgs = { _sale_id: string; _store_id: string; _product_id: string; _quantity: number };
+
+export async function addItemToSale(args: AddItemToSaleArgs) {
+  return supabase.rpc("add_item_to_sale" as never, args as never) as unknown as Promise<{
+    data: SaleRow | null;
     error: { message: string } | null;
   }>;
 }

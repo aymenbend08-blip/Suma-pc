@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, session, shell } from "electron";
 import { join } from "path";
 import { initDb } from "./db";
 import { registerDbIpc } from "./ipc-db";
+import { printOffscreenHtml } from "./printing";
 
 const isDev = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
@@ -61,11 +62,11 @@ void app.whenReady().then(() => {
   initDb(app.getPath("userData"));
   registerDbIpc();
 
-  // Prints the receipt page to the system's default printer (e.g. a
-  // thermal 80mm printer set as default on Windows) with no dialog —
-  // matches the current SUMA web flow of one click → printed receipt.
-  // Real ESC/POS raw printing is a later-phase upgrade, not needed to
-  // reuse the existing ReceiptView-style HTML.
+  // Legacy whole-window print — kept only as a last-resort fallback (see
+  // preload/index.ts printReceipt/printLabel, which now print a dedicated
+  // offscreen HTML document instead of whatever the cashier has on
+  // screen). No remaining call site in the renderer relies on this as the
+  // primary path.
   ipcMain.handle("print:silent", async () => {
     if (!mainWindow) return { ok: false, error: "no-window" };
     try {
@@ -75,6 +76,28 @@ void app.whenReady().then(() => {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
+
+  // Real, dedicated print paths (Phase A items 1 & 3) — both go through
+  // the same offscreen-BrowserWindow helper (main/printing.ts) instead of
+  // printing the visible app window. `print:receipt` prints one 80mm
+  // receipt document; `print:label` prints one label document N times
+  // (native `copies`) at the label's own physical size.
+  ipcMain.handle("print:receipt", async (_e, html: string) => {
+    // 80mm width, generous continuous-feed length — thermal receipt rolls
+    // don't have a fixed page length, this just needs to be tall enough
+    // that a normal receipt's content is never truncated.
+    return printOffscreenHtml(html, { pageSize: { width: 80000, height: 297000 } });
+  });
+
+  ipcMain.handle(
+    "print:label",
+    async (_e, html: string, opts: { widthMm: number; heightMm: number; copies: number }) => {
+      return printOffscreenHtml(html, {
+        pageSize: { width: Math.round(opts.widthMm * 1000), height: Math.round(opts.heightMm * 1000) },
+        copies: Math.max(1, Math.min(200, Math.round(opts.copies) || 1)),
+      });
+    },
+  );
 
   createWindow();
 
