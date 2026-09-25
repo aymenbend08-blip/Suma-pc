@@ -15,16 +15,20 @@ function readStaleSession(): Session | null {
   return parseStaleSession<Session>(window.localStorage.getItem(supabaseAuthStorageKey));
 }
 
-/** Once per session-becoming-available, best-effort: claims any
- * store_members row an admin added for this person by phone (Phase A
- * item 8 — EmployeesPage's "add by phone" flow) before this exact
- * account existed or was ever seen by this store. Same
- * link_my_employee_accounts() RPC SUMA Web calls after sign-in;
- * idempotent (a no-op UPDATE once already linked, or if the profile has
- * no phone yet), so calling it on every fresh session is safe. Errors
- * are swallowed — this must never block or fail sign-in itself, and
- * StoreContext's own load will simply show no extra membership if this
- * didn't find anything to link. */
+/** Once per session-becoming-available, best-effort: REQUESTS a link (does
+ * not itself grant one — confirmed by reading link_my_employee_accounts()'s
+ * live body, which only stamps pending_link_user_id/pending_link_requested_at
+ * and explicitly leaves user_id untouched) between this signed-in person
+ * and any store_members row an admin added for them by phone (Phase A item
+ * 8 — EmployeesPage's "add by phone" flow) before this exact account
+ * existed or was ever seen by this store. An admin still has to approve
+ * the request from EmployeesPage's "طلبات الربط المعلّقة" section
+ * (decide_employee_link_request()) before it actually takes effect — this
+ * call alone is not enough to give the employee store access. Same RPC
+ * SUMA Web calls after sign-in; idempotent (a no-op UPDATE once already
+ * pending/linked, or if the profile has no phone yet), so calling it on
+ * every fresh session is safe. Errors are swallowed — this must never
+ * block or fail sign-in itself. */
 function linkEmployeeAccountsBestEffort(): void {
   void supabase.rpc("link_my_employee_accounts" as never, {} as never).then(
     () => {},

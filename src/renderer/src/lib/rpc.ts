@@ -6,6 +6,7 @@ import type {
   RegisterSessionRow,
   SaleRow,
   StocktakeSessionRow,
+  StoreMemberRow,
 } from "./database.types";
 
 /**
@@ -177,13 +178,56 @@ export async function closeRegister(args: CloseRegisterArgs) {
   }>;
 }
 
-/** Adds a forgotten line item to an already-recorded sale — used by Sales
- * History's "إضافة صنف منسي" action. Online-only (no offline mirror). */
+/** Adds a forgotten line item to an already-recorded sale. The RPC exists
+ * and is typed/wrapped here, but NO Phase A screen calls it yet — Sales
+ * History has no "add forgotten item" action (an earlier draft of this
+ * comment claimed otherwise; that was inaccurate and has been corrected).
+ * Kept for a future pass rather than removed, since it's a real,
+ * server-verified RPC with nothing client-side left to build wrong.
+ * Online-only (no offline mirror). */
 export type AddItemToSaleArgs = { _sale_id: string; _store_id: string; _product_id: string; _quantity: number };
 
 export async function addItemToSale(args: AddItemToSaleArgs) {
   return supabase.rpc("add_item_to_sale" as never, args as never) as unknown as Promise<{
     data: SaleRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/**
+ * Employee-account linking (Phase A item 8, completing the "add by
+ * phone" flow). `link_my_employee_accounts()` (called from AuthContext
+ * after sign-in) does NOT itself grant access — it only stamps
+ * `pending_link_user_id`/`pending_link_requested_at` on any unlinked
+ * store_members row matching the signer's phone (confirmed by reading
+ * the live function body: it explicitly does not set `user_id`). An
+ * admin must review and approve each request with these two RPCs before
+ * that employee's `store_members.user_id` is actually set — without this
+ * screen the earlier build's "add employee by phone" flow was a dead
+ * end: the row would sit pending forever and the employee would sign in
+ * to an empty store list.
+ */
+export type PendingEmployeeLinkRequest = {
+  store_member_id: string;
+  member_full_name: string | null;
+  member_phone: string | null;
+  requested_at: string;
+  requester_full_name: string | null;
+  requester_email: string | null;
+};
+
+export async function listPendingEmployeeLinkRequests(storeId: string) {
+  return supabase.rpc("list_pending_employee_link_requests" as never, { _store_id: storeId } as never) as unknown as Promise<{
+    data: PendingEmployeeLinkRequest[] | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export type DecideEmployeeLinkRequestArgs = { _store_member_id: string; _approve: boolean };
+
+export async function decideEmployeeLinkRequest(args: DecideEmployeeLinkRequestArgs) {
+  return supabase.rpc("decide_employee_link_request" as never, args as never) as unknown as Promise<{
+    data: StoreMemberRow | null;
     error: { message: string } | null;
   }>;
 }

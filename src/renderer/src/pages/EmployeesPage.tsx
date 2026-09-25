@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Pencil, Plus, Power, Users, X } from "lucide-react";
+import { Check, Loader2, Pencil, Plus, Power, Users, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
+import { decideEmployeeLinkRequest, listPendingEmployeeLinkRequests, type PendingEmployeeLinkRequest } from "@/lib/rpc";
+import { formatDateTime } from "@/lib/format";
 import type { StoreMemberRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,11 +51,19 @@ const EMPTY_FORM: FormState = {
  * "Add by phone" mirrors SUMA Web's own account-linking flow exactly: a
  * new row is inserted with `user_id = null` and a phone number; when
  * that phone's owner later signs in, AuthContext calls the existing
- * `link_my_employee_accounts()` RPC, which claims any unlinked
- * store_members row matching their profile's phone. Desktop has no way
- * to look up an existing user by phone up front (profiles is
- * self-select-only under RLS), so there's no separate "link existing
- * account" step here — it's the same one flow either way.
+ * `link_my_employee_accounts()` RPC, which stamps (never auto-approves)
+ * a pending link request on any unlinked store_members row matching
+ * their profile's phone. Desktop has no way to look up an existing user
+ * by phone up front (profiles is self-select-only under RLS), so there's
+ * no separate "link existing account" step here — it's the same one flow
+ * either way.
+ *
+ * That request still needs an admin's explicit approval before it takes
+ * effect (`decide_employee_link_request()`) — the "طلبات الربط المعلّقة"
+ * section below is that missing other half of the flow: without it, a
+ * phone-added employee's row would sit with `user_id` permanently null
+ * and they'd sign in to see no stores at all, no matter how many times
+ * `link_my_employee_accounts()` re-ran.
  */
 export function EmployeesPage() {
   const { active } = useStore();
@@ -66,6 +76,10 @@ export function EmployeesPage() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const [pending, setPending] = useState<PendingEmployeeLinkRequest[]>([]);
+  const [loadingPending, setLoadingPending] = useState(true);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+
   async function load() {
     setLoading(true);
     const { data, error } = await supabase.from("store_members").select("*").eq("store_id", storeId).order("full_name");
@@ -77,10 +91,32 @@ export function EmployeesPage() {
     setMembers(data ?? []);
   }
 
+  async function loadPending() {
+    setLoadingPending(true);
+    const { data, error } = await listPendingEmployeeLinkRequests(storeId);
+    setLoadingPending(false);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    setPending(data ?? []);
+  }
+
   useEffect(() => {
     void load();
+    void loadPending();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeId]);
+
+  async function decide(req: PendingEmployeeLinkRequest, approve: boolean) {
+    setDecidingId(req.store_member_id);
+    const { error } = await decideEmployeeLinkRequest({ _store_member_id: req.store_member_id, _approve: approve });
+    setDecidingId(null);
+    if (error) return toast.error(mapMemberError(error.message));
+    toast.success(approve ? "تم قبول طلب الربط — يقدر يدخل للمحل الآن." : "تم رفض طلب الربط.");
+    void load();
+    void loadPending();
+  }
 
   function openNew() {
     setForm(EMPTY_FORM);
@@ -163,6 +199,37 @@ export function EmployeesPage() {
         </p>
       </div>
 
+      {!loadingPending && pending.length > 0 && (
+        <div className="surface border-[var(--warning)]/40 bg-[var(--warning)]/10 p-4">
+          <h2 className="mb-2 text-sm font-bold text-[var(--warning-foreground)]">
+            طلبات الربط المعلّقة ({pending.length})
+          </h2>
+          <p className="mb-3 text-xs text-muted-foreground">
+            هؤلاء الأشخاص سجّلوا دخولهم برقم هاتف يطابق موظفًا مضافًا هنا، وينتظرون موافقتك باش يقدروا يدخلوا للمحل.
+          </p>
+          <ul className="space-y-2">
+            {pending.map((req) => (
+              <li key={req.store_member_id} className="flex flex-wrap items-center gap-2 rounded-lg bg-background p-2.5 text-sm">
+                <div className="flex-1">
+                  <p className="font-medium">{req.member_full_name || "—"} <span className="text-xs text-muted-foreground num" dir="ltr">({req.member_phone})</span></p>
+                  <p className="text-xs text-muted-foreground">
+                    طلب من: {req.requester_full_name || req.requester_email || "—"} · {formatDateTime(req.requested_at)}
+                  </p>
+                </div>
+                <Button size="sm" disabled={decidingId === req.store_member_id} onClick={() => void decide(req, true)}>
+                  {decidingId === req.store_member_id ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Check className="size-3.5" aria-hidden />}
+                  قبول
+                </Button>
+                <Button size="sm" variant="outline" className="text-destructive" disabled={decidingId === req.store_member_id} onClick={() => void decide(req, false)}>
+                  <X className="size-3.5" aria-hidden />
+                  رفض
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="surface overflow-hidden p-0">
         {loading ? (
           <div className="grid place-items-center py-10">
@@ -193,7 +260,9 @@ export function EmployeesPage() {
                       {m.is_active ? "نشط" : "موقوف"}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-center text-xs text-muted-foreground">{m.user_id ? "نعم" : "بانتظار أول تسجيل دخول"}</td>
+                  <td className="px-3 py-2 text-center text-xs text-muted-foreground">
+                    {m.user_id ? "نعم" : m.pending_link_user_id ? "بانتظار موافقتك ⬆" : "بانتظار أول تسجيل دخول"}
+                  </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center justify-center gap-1">
                       <Button variant="ghost" size="icon" className="size-7" onClick={() => openEdit(m)}>
