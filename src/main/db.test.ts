@@ -434,9 +434,14 @@ describe("product_variants mirror", () => {
     expect(db.findProductByBarcode("store-2", "OTHER-1")?.id).toBe("prod-1b");
   });
 
-  it("initDb is idempotent on an existing database file (upgrade path adds the table without touching data)", () => {
+  it("upgrades an existing pre-variants database file without touching its data", () => {
     seedProduct();
-    db.initDb(tempDir); // simulate the next app launch on the same file
+    // Simulate an install from before this table existed.
+    const raw = new Database(join(tempDir, "suma-desktop.db"));
+    raw.exec("DROP TABLE product_variants");
+    raw.close();
+
+    db.initDb(tempDir); // next app launch on the same file
     expect(db.findProductByBarcode("store-1", "1234567890")?.id).toBe("prod-1");
     db.replaceProductVariants("store-1", [seedVariant()]);
     expect(db.findProductByBarcode("store-1", "VAR-RED-1")?.id).toBe("prod-1");

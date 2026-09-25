@@ -25,6 +25,7 @@ import {
   guessMapping,
   mergePreview,
   prepareRows,
+  restoreScientificIntegers,
   type ColumnMapping,
   type ImportCounts,
   type ImportField,
@@ -96,7 +97,10 @@ async function readWorkbook(file: File): Promise<WorkBook> {
     if (text.includes("�")) text = new TextDecoder("windows-1256").decode(buf);
     return XLSX.read(text.replace(/^﻿/, ""), { type: "string", raw: true });
   }
-  return XLSX.read(buf, { type: "array" });
+  // dateNF at READ time is what rewrites Excel's default date format (code
+  // 14, shown as m/d/yy) to ISO; explicit formats like dd/mm/yyyy are
+  // parsed by parseDateCell.
+  return XLSX.read(buf, { type: "array", dateNF: "yyyy-mm-dd" });
 }
 
 /**
@@ -170,8 +174,8 @@ export function ProductImportDialog({
   async function loadSheet(wb: WorkBook, name: string) {
     const XLSX = await import("xlsx");
     const sheet = wb.Sheets[name];
-    // raw: false reads the DISPLAYED text (keeps "0012345" barcodes intact);
-    // dateNF makes date cells come out as YYYY-MM-DD instead of m/d/yy.
+    if (sheet) restoreScientificIntegers(sheet as unknown as Record<string, unknown>);
+    // raw: false reads the DISPLAYED text (keeps "0012345" barcodes intact).
     const json = sheet
       ? XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false, dateNF: "yyyy-mm-dd" })
       : [];

@@ -242,6 +242,30 @@ export function parseDateCell(raw: unknown): CellParse<string> {
   return { kind: "invalid" };
 }
 
+/**
+ * Excel's General format shows a long integer typed as a number (the usual
+ * way a barcode column ends up) in scientific notation — "6.13E+12" — and
+ * that displayed text is what sheet_to_json(raw: false) returns. For every
+ * numeric cell whose display uses an exponent but whose value is an exact
+ * integer, restore the full digits as the display text. Values beyond 2^53
+ * already lost digits inside the file and are left alone (they then fail
+ * barcode validation visibly instead of importing a wrong code).
+ * Mutates a SheetJS worksheet object in place; returns the cells fixed.
+ */
+export function restoreScientificIntegers(sheet: Record<string, unknown>): number {
+  let fixed = 0;
+  for (const [address, value] of Object.entries(sheet)) {
+    if (address.startsWith("!") || !value || typeof value !== "object") continue;
+    const cell = value as { t?: string; v?: unknown; w?: string };
+    if (cell.t !== "n" || typeof cell.v !== "number" || typeof cell.w !== "string") continue;
+    if (!/e[+-]?\d/i.test(cell.w)) continue;
+    if (!Number.isInteger(cell.v) || Math.abs(cell.v) > Number.MAX_SAFE_INTEGER) continue;
+    cell.w = String(cell.v);
+    fixed += 1;
+  }
+  return fixed;
+}
+
 export function isValidBarcode(code: string): boolean {
   return code.length > 0 && code.length <= BARCODE_MAX && BARCODE_FORMAT.test(code);
 }

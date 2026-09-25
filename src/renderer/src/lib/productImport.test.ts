@@ -17,6 +17,7 @@ import {
   parseNumberCell,
   parseNumberLoose,
   prepareRows,
+  restoreScientificIntegers,
 } from "./productImport";
 
 describe("normalizeHeader", () => {
@@ -358,5 +359,24 @@ describe("helpers", () => {
       unit: "علبة",
       category_name: "ألبان",
     });
+  });
+});
+
+describe("restoreScientificIntegers", () => {
+  it("restores full digits for integer cells shown in scientific notation only", () => {
+    const sheet: Record<string, unknown> = {
+      "!ref": "A1:D2",
+      A2: { t: "n", v: 6130001112223, w: "6.13E+12" },
+      B2: { t: "n", v: 1200.5, w: "1200.5" },
+      C2: { t: "n", v: 1.5e-7, w: "1.5E-07" },
+      D2: { t: "n", v: 12345678901234567890, w: "1.23457E+19" },
+      E2: { t: "s", v: "6.13E+12", w: "6.13E+12" },
+    };
+    expect(restoreScientificIntegers(sheet)).toBe(1);
+    expect((sheet.A2 as { w: string }).w).toBe("6130001112223");
+    expect((sheet.B2 as { w: string }).w).toBe("1200.5");
+    expect((sheet.C2 as { w: string }).w).toBe("1.5E-07");
+    expect((sheet.D2 as { w: string }).w).toBe("1.23457E+19");
+    expect((sheet.E2 as { w: string }).w).toBe("6.13E+12");
   });
 });
