@@ -1,12 +1,15 @@
 import {
+  Banknote,
   BarChart3,
   CalendarDays,
+  Receipt,
   RefreshCw,
   RotateCcw,
   Settings,
   ShoppingBag,
   ShoppingCart,
   Truck,
+  UserCog,
   Users,
   Wallet,
 } from "lucide-react";
@@ -27,10 +30,10 @@ type Tile = {
 /**
  * The landing screen after login — a menu of shortcuts to every section of
  * the program, reordered/recolored from the shop's reference register
- * software (ZN Stock) into SUMA's own palette. Tiles for features that
- * don't exist on Desktop yet (Suppliers, Purchases, Settings) are real,
- * separate screens that say so plainly (ComingSoonPage) rather than dead
- * buttons or a faked flow.
+ * software (ZN Stock) into SUMA's own palette. Suppliers/Purchases/
+ * Settings tiles used to route to ComingSoonPage — fixed here (Phase A)
+ * to point at the real screens that already exist (PurchasesPage,
+ * SettingsPage), which this tile list had drifted out of sync with.
  */
 export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
   const { active, perms } = useStore();
@@ -66,11 +69,39 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
       onClick: () => onNavigate("pos", { autoOpenReturn: true }),
     },
     {
+      key: "cash-register",
+      label: "الصندوق",
+      icon: Wallet,
+      visible: perms.canUsePos,
+      onClick: () => onNavigate("cash-register"),
+    },
+    {
+      key: "sales-history",
+      label: "سجل المبيعات",
+      icon: Receipt,
+      visible: perms.isAdmin,
+      onClick: () => onNavigate("sales-history"),
+    },
+    {
       key: "dashboard",
       label: "الإحصائيات",
       icon: BarChart3,
       visible: perms.isAdmin,
       onClick: () => onNavigate("dashboard"),
+    },
+    {
+      key: "expenses",
+      label: "المصاريف",
+      icon: Banknote,
+      visible: perms.isAdmin,
+      onClick: () => onNavigate("expenses"),
+    },
+    {
+      key: "employees",
+      label: "الموظفون",
+      icon: UserCog,
+      visible: perms.isAdmin,
+      onClick: () => onNavigate("employees"),
     },
     {
       key: "sync",
@@ -85,24 +116,21 @@ export function HomePage({ onNavigate }: { onNavigate: Navigate }) {
       label: "الموردون",
       icon: Truck,
       visible: perms.isAdmin,
-      comingSoon: true,
-      onClick: () => onNavigate("coming-soon", { comingSoonTitle: "الموردون" }),
+      onClick: () => onNavigate("purchases", { openSuppliers: true }),
     },
     {
       key: "purchases",
       label: "المشتريات",
       icon: ShoppingBag,
       visible: perms.isAdmin,
-      comingSoon: true,
-      onClick: () => onNavigate("coming-soon", { comingSoonTitle: "المشتريات" }),
+      onClick: () => onNavigate("purchases"),
     },
     {
       key: "settings",
       label: "الإعدادات",
       icon: Settings,
       visible: perms.isAdmin,
-      comingSoon: true,
-      onClick: () => onNavigate("coming-soon", { comingSoonTitle: "الإعدادات" }),
+      onClick: () => onNavigate("settings"),
     },
   ];
 

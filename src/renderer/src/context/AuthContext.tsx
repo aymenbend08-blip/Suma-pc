@@ -15,6 +15,23 @@ function readStaleSession(): Session | null {
   return parseStaleSession<Session>(window.localStorage.getItem(supabaseAuthStorageKey));
 }
 
+/** Once per session-becoming-available, best-effort: claims any
+ * store_members row an admin added for this person by phone (Phase A
+ * item 8 — EmployeesPage's "add by phone" flow) before this exact
+ * account existed or was ever seen by this store. Same
+ * link_my_employee_accounts() RPC SUMA Web calls after sign-in;
+ * idempotent (a no-op UPDATE once already linked, or if the profile has
+ * no phone yet), so calling it on every fresh session is safe. Errors
+ * are swallowed — this must never block or fail sign-in itself, and
+ * StoreContext's own load will simply show no extra membership if this
+ * didn't find anything to link. */
+function linkEmployeeAccountsBestEffort(): void {
+  void supabase.rpc("link_my_employee_accounts" as never, {} as never).then(
+    () => {},
+    () => {},
+  );
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,13 +40,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     supabase.auth
       .getSession()
       .then(({ data, error }) => {
-        setSession(
-          decideAuthSession<Session>(
-            data.session,
-            error ? { message: error.message } : null,
-            window.localStorage.getItem(supabaseAuthStorageKey),
-          ),
+        const resolved = decideAuthSession<Session>(
+          data.session,
+          error ? { message: error.message } : null,
+          window.localStorage.getItem(supabaseAuthStorageKey),
         );
+        setSession(resolved);
+        if (resolved) linkEmployeeAccountsBestEffort();
         setLoading(false);
       })
       .catch(() => {
@@ -41,8 +58,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSession(readStaleSession());
         setLoading(false);
       });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, newSession) => {
       setSession(newSession);
+      if (event === "SIGNED_IN" && newSession) linkEmployeeAccountsBestEffort();
     });
     return () => sub.subscription.unsubscribe();
   }, []);

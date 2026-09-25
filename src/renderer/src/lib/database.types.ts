@@ -375,6 +375,11 @@ export type Database = {
         Args: { _sale_id: string; _store_id: string; _product_id: string; _quantity: number };
         Returns: SaleRow;
       };
+      /** Claims any store_members row (added by phone, user_id still
+       * null) matching the signed-in user's own profile phone — see
+       * EmployeesPage's "add by phone" flow and AuthContext's call to it
+       * after sign-in. No args, returns the number of rows linked. */
+      link_my_employee_accounts: { Args: Record<string, never>; Returns: number };
     };
     Enums: Record<string, never>;
   };
