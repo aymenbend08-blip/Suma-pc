@@ -24,6 +24,8 @@ import { useAuth } from "@/context/AuthContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
 import { uuid } from "@/lib/uuid";
+import { printSaleReceipt, type PrintableSale } from "@/lib/printReceipt";
+import type { ReceiptItem } from "@/lib/receipt";
 import type { CategoryRow, CustomerRow, ProductRow, SaleItemRow, SaleRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,6 +56,10 @@ type HeldSale = {
 };
 
 const HELD_KEY_PREFIX = "suma-pos-held-sales:";
+
+function cartToReceiptItems(cart: CartLine[]): ReceiptItem[] {
+  return cart.map((l) => ({ name: l.name, quantity: l.quantity, unitPrice: l.unitPrice, lineTotal: l.unitPrice * l.quantity }));
+}
 
 // Minimal typing for the Web Speech API (not in TS's default DOM lib) —
 // same helper SUMA Web's pos.tsx uses for the exact same feature.
@@ -107,6 +113,15 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
   const [clientRequestId, setClientRequestId] = useState(() => uuid());
   const [checkingOut, setCheckingOut] = useState(false);
   const [lastSale, setLastSale] = useState<SaleRow | null>(null);
+  // Snapshot of the last completed sale's printable data — captured at the
+  // moment checkout succeeds, BEFORE resetCartAfterSale() clears the cart,
+  // since that's the only place the line items (name/qty/price) still
+  // exist. An offline sale's recordSale() response has no line items of
+  // its own (only {id, total_amount}), so this is the only source for it.
+  const [lastReceipt, setLastReceipt] = useState<{ sale: PrintableSale; items: ReceiptItem[]; customerName: string | null } | null>(
+    null,
+  );
+  const [printingReceipt, setPrintingReceipt] = useState(false);
 
   const [now, setNow] = useState(() => new Date());
   const [showHeld, setShowHeld] = useState(false);
@@ -375,6 +390,7 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     if (!error && data) {
       setCheckingOut(false);
       setLastSale(data);
+      setLastReceipt({ sale: data, items: cartToReceiptItems(cart), customerName: customer?.full_name ?? null });
       toast.success(`تم البيع بنجاح — ${formatDA(data.total_amount)}`);
       resetCartAfterSale();
       return;
@@ -406,6 +422,23 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
       });
       setCheckingOut(false);
       toast.success(`تم البيع (بدون إنترنت) — ${formatDA(localSale.total_amount)} — سيُزامن تلقائيًا.`);
+      // recordSale()'s response has no line items of its own when it
+      // comes back offline (createLocalSale only returns {id,
+      // total_amount}) — build the printable snapshot from what's known
+      // at this exact moment (the cart) instead, same as the online path.
+      setLastReceipt({
+        sale: {
+          id: localSale.id,
+          occurred_at: new Date().toISOString(),
+          cashier_name: session!.user.email ?? null,
+          payment_method: paymentMethod,
+          discount_amount: discount,
+          total_amount: localSale.total_amount,
+          refunded_amount: 0,
+        },
+        items: cartToReceiptItems(cart),
+        customerName: customer?.full_name ?? null,
+      });
       refreshPending();
       resetCartAfterSale();
     } catch (localError) {
@@ -425,13 +458,19 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     searchRef.current?.focus();
   }
 
+  /** Prints the real 80mm receipt template (Phase A item 1) for the last
+   * completed sale — nothing to print if no sale has completed yet this
+   * session (there's no visible-window fallback anymore; a dedicated
+   * receipt needs actual sale data, not "whatever's on screen"). */
   async function printReceipt() {
-    if (window.suma?.printSilent) {
-      const res = await window.suma.printSilent();
-      if (!res.ok) toast.error("تعذرت الطباعة — تحقق من الطابعة الافتراضية.");
-    } else {
-      window.print();
+    if (!lastReceipt || !active) {
+      toast.error("لا توجد فاتورة لطباعتها بعد.");
+      return;
     }
+    setPrintingReceipt(true);
+    const res = await printSaleReceipt({ store: active, sale: lastReceipt.sale, items: lastReceipt.items, customerName: lastReceipt.customerName });
+    setPrintingReceipt(false);
+    if (!res.ok) toast.error("تعذرت الطباعة — تحقق من الطابعة الافتراضية.");
   }
 
   function holdSale() {
@@ -795,8 +834,14 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                 </span>
               )}
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => void printReceipt()} title="طباعة آخر فاتورة [F5]">
-              <Printer className="size-4" aria-hidden />
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={!lastReceipt || printingReceipt}
+              onClick={() => void printReceipt()}
+              title="طباعة آخر فاتورة [F5]"
+            >
+              {printingReceipt ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Printer className="size-4" aria-hidden />}
             </Button>
           </div>
 
