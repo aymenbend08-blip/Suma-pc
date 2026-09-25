@@ -269,6 +269,10 @@ export function CashRegisterPage() {
 
           <TabsContent value="report">
             <div className="surface max-w-2xl p-4">
+              {!reportSessionId ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">لا توجد جلسات صندوق سابقة بعد — افتح الصندوق أولًا.</p>
+              ) : (
+              <>
               <div className="mb-3 flex items-center gap-2">
                 <Label htmlFor="session-pick" className="shrink-0">الجلسة</Label>
                 <select
@@ -358,6 +362,8 @@ export function CashRegisterPage() {
                     </div>
                   )}
                 </>
+              )}
+              </>
               )}
             </div>
           </TabsContent>

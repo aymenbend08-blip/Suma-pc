@@ -92,7 +92,13 @@ function AuthedApp() {
         {effectivePage === "cash-register" && perms.canUsePos && <CashRegisterPage />}
         {effectivePage === "expenses" && perms.isAdmin && <ExpensesPage />}
         {effectivePage === "employees" && perms.isAdmin && <EmployeesPage />}
-        {effectivePage === "settings" && perms.isAdmin && <SettingsPage />}
+        {/* Keyed on the active store id: SettingsPage seeds its form
+            fields once from `store.xxx` via useState initializers (the
+            simplest option, since every value is already synchronously
+            available on StoreRow) rather than an effect-driven reload —
+            the key forces a full remount on a multi-store switch so
+            those fields aren't left showing the previous store's data. */}
+        {effectivePage === "settings" && perms.isAdmin && active && <SettingsPage key={active.id} />}
         {effectivePage === "sync" && perms.isAdmin && <SyncQueuePage />}
         {effectivePage === "coming-soon" && <ComingSoonPage title={navOpts.comingSoonTitle ?? "قريبًا"} />}
       </Shell>

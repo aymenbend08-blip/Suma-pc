@@ -993,6 +993,17 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                 </Button>
               ))}
             </div>
+
+            {/* record_sale() itself never enforces credit_limit server-side
+                (confirmed against the live RPC — it's a soft, informational
+                figure only, same on SUMA Web) — this is a non-blocking
+                heads-up for the cashier, never a checkout block, consistent
+                with what the server will actually allow. */}
+            {paymentMethod === "credit" && customer && active && Number(customer.credit_balance) + total > Number(active.credit_limit) && Number(active.credit_limit) > 0 && (
+              <p className="mt-2 text-xs font-medium text-[var(--warning-foreground)]">
+                تنبيه: هذا البيع سيتجاوز سقف الدّين المسموح لهذا الزبون ({formatDA(active.credit_limit)}).
+              </p>
+            )}
           </div>
 
           {blockedOffline && (
