@@ -20,6 +20,9 @@ export function parseLabelSize(label: string | null | undefined): { widthMm: num
 
 export type LabelData = {
   productName: string;
+  /** Printed under the product name on a variant's label (the variant
+   * shares the product's price, so only its name + own barcode differ). */
+  variantName?: string | null;
   price: number | null;
   barcodeValue: string | null;
   /** Pre-rendered data:image/png URL from lib/barcode.ts, or null when
@@ -75,12 +78,22 @@ export function buildLabelHtml(data: LabelData): string {
     direction: ltr;
     unicode-bidi: isolate;
   }
+  .variant {
+    font-size: ${compact ? "8px" : "10px"};
+    font-weight: 600;
+    text-align: center;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .barcode { max-width: 92%; ${compact ? "max-height: 40%;" : "max-height: 45%;"} }
   .barcode-fallback { font-size: 9px; direction: ltr; unicode-bidi: isolate; }
 </style>
 </head>
 <body>
   <p class="name">${esc(data.productName)}</p>
+  ${data.variantName ? `<p class="variant">${esc(data.variantName)}</p>` : ""}
   ${data.barcodeDataUrl ? `<img class="barcode" src="${esc(data.barcodeDataUrl)}" />` : data.barcodeValue ? `<p class="barcode-fallback">${esc(data.barcodeValue)}</p>` : ""}
   ${data.price !== null ? `<p class="price">${esc(data.price.toLocaleString("fr-FR", { maximumFractionDigits: 2 }))} دج</p>` : ""}
 </body>

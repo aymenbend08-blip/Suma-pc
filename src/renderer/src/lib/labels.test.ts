@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLabelSize } from "./labels";
+import { buildLabelHtml, parseLabelSize } from "./labels";
 
 describe("parseLabelSize", () => {
   it("parses the three known LABEL_SIZES options", () => {
@@ -17,5 +17,26 @@ describe("parseLabelSize", () => {
 
   it("also accepts a plain ascii x separator", () => {
     expect(parseLabelSize("100x60")).toEqual({ widthMm: 100, heightMm: 60 });
+  });
+});
+
+describe("buildLabelHtml", () => {
+  it("prints the variant name under the product name when given, escaped", () => {
+    const html = buildLabelHtml({
+      productName: "قميص",
+      variantName: "أحمر <XL>",
+      price: 1200,
+      barcodeValue: "VAR-1",
+      barcodeDataUrl: null,
+      widthMm: 58,
+      heightMm: 40,
+    });
+    expect(html).toContain('<p class="variant">أحمر &lt;XL&gt;</p>');
+    expect(html).toContain("VAR-1");
+  });
+
+  it("omits the variant line for the base product", () => {
+    const html = buildLabelHtml({ productName: "قميص", price: null, barcodeValue: null, barcodeDataUrl: null, widthMm: 58, heightMm: 40 });
+    expect(html).not.toContain('class="variant"');
   });
 });

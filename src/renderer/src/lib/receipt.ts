@@ -14,6 +14,8 @@
 
 export type ReceiptItem = {
   name: string;
+  /** Variant sold (sale_items.variant_name) — printed under the name. */
+  variantName?: string | null;
   quantity: number;
   unitPrice: number;
   lineTotal: number;
@@ -75,7 +77,7 @@ export function buildReceiptHtml(data: ReceiptData): string {
     .map(
       (i) => `
       <tr>
-        <td class="name">${esc(i.name)}</td>
+        <td class="name">${esc(i.name)}${i.variantName ? `<div class="variant">${esc(i.variantName)}</div>` : ""}</td>
         <td class="num">${esc(i.quantity)}</td>
         <td class="num">${esc(money(i.unitPrice))}</td>
         <td class="num strong">${esc(money(i.lineTotal))}</td>
@@ -108,6 +110,7 @@ export function buildReceiptHtml(data: ReceiptData): string {
   thead th.num, td.num { text-align: center; }
   td { padding: 1mm 0.5mm; vertical-align: top; }
   td.name { text-align: start; }
+  td.name .variant { font-size: 9.5px; color: #333; }
   td.strong { font-weight: 700; }
   .totals { width: 100%; font-size: 12px; margin-top: 1mm; }
   .totals tr td { padding: 0.5mm 0; }

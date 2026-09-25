@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { History, Loader2, Plus, Printer, Trash2, Wand2, X } from "lucide-react";
+import { CloudOff, History, Loader2, Printer, Wand2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { adjustStock } from "@/lib/rpc";
 import { formatDA, formatDateTime } from "@/lib/format";
 import { generateBarcodeDataUrl } from "@/lib/barcode";
 import { buildLabelHtml, parseLabelSize } from "@/lib/labels";
+import { findBarcodeConflict, mapProductError, validateBarcode } from "@/lib/productBarcodes";
+import { uploadProductImage } from "@/lib/productImages";
+import { useStore } from "@/context/StoreContext";
+import { useSync } from "@/context/SyncContext";
 import type {
   CategoryRow,
   ProductBarcodeRow,
@@ -17,6 +21,9 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ExtraBarcodesSection } from "@/components/products/ExtraBarcodesSection";
+import { VariantsSection } from "@/components/products/VariantsSection";
+import { PriceHistorySection } from "@/components/products/PriceHistorySection";
 
 const REASON_LABEL: Record<string, string> = {
   sale: "بيع",
@@ -26,9 +33,22 @@ const REASON_LABEL: Record<string, string> = {
   stocktake: "جرد/تسوية",
 };
 
+// Unit lists: every value SUMA Web offers (وحدة, كغ, غرام, لتر, مل, علبة,
+// كرطونة, متر, باكيتة) is selectable here, plus PC's own default 'قطعة'.
+// A product whose unit is none of these (e.g. 'قارورة' from an import) keeps
+// it — it's listed as an extra option and is never rewritten on save
+// unless the user actually picks another unit.
+const PIECE_UNITS = ["قطعة", "وحدة"];
 const WEIGHT_UNITS = ["كغ", "غرام"];
 const MEASURE_UNITS = ["لتر", "مل", "متر", "علبة", "كرطونة", "باكيتة"];
+const DEFAULT_UNIT = "قطعة";
 const LABEL_SIZES = ["80×50 مم", "58×40 مم", "40×30 مم"];
+
+const PRICE_MAX = 99_999_999;
+const NAME_MAX = 160;
+const INTERNAL_CODE_MAX = 40;
+const DESCRIPTION_MAX = 1000;
+const POINTS_MAX = 10_000;
 
 type SaleMethod = "piece" | "weight" | "measure";
 
@@ -38,26 +58,11 @@ function methodFromUnit(unit: string): SaleMethod {
   return "piece";
 }
 
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-};
-
-function mapProductError(message: string): string {
-  if (message.includes("uq_products_store_barcode") || message.includes("uq_product_barcodes_store_barcode")) {
-    return "هذا الباركود مستعمل من قبل في محلك.";
-  }
-  if (message.includes("uq_products_store_internal")) {
-    return "الكود الداخلي مستعمل من قبل في محلك.";
-  }
-  if (message.toLowerCase().includes("row-level security")) {
-    return "ما عندكش الصلاحية باش تدير هذا التغيير.";
-  }
-  return message;
+/** Parses an optional numeric field; "" -> null, garbage -> NaN. */
+function optionalNumber(raw: string): number | null {
+  const t = raw.trim();
+  if (!t) return null;
+  return Number(t.replace(",", "."));
 }
 
 type SecondaryTab = "packaging" | "specifications" | "sizes" | "expiry";
@@ -88,6 +93,15 @@ export function ProductFichePage({
   onClose: () => void;
   onSaved: (row: ProductRow) => void;
 }) {
+  const { perms } = useStore();
+  const { isOnline } = useSync();
+  // RLS: creating a product is store-admin only (products_admin_insert);
+  // editing is admin or can_manage_products; a selling-price CHANGE on an
+  // existing product is owner-only (trg_products_price_owner_only).
+  const canWrite = product ? perms.canManageProducts : perms.isAdmin;
+  const priceLocked = Boolean(product) && !perms.canUpdatePrice;
+  const offlineReason = isOnline ? null : "غير متصل — التعديل يحتاج اتصالاً بالإنترنت.";
+
   const [name, setName] = useState(product?.name ?? "");
   const [internalCode, setInternalCode] = useState(product?.internal_code ?? "");
   const [barcode, setBarcode] = useState(product?.barcode ?? initialBarcode ?? "");
@@ -106,11 +120,15 @@ export function ProductFichePage({
   const [lowStockThreshold, setLowStockThreshold] = useState(product?.low_stock_threshold?.toString() ?? "5");
   const [locationInStore, setLocationInStore] = useState(product?.location_in_store ?? "");
 
-  const [unit, setUnit] = useState(product?.unit ?? "قطعة");
-  const [saleMethod, setSaleMethod] = useState<SaleMethod>(methodFromUnit(product?.unit ?? "قطعة"));
+  const initialUnit = product?.unit ?? DEFAULT_UNIT;
+  const [unit, setUnit] = useState(initialUnit);
+  const [saleMethod, setSaleMethod] = useState<SaleMethod>(methodFromUnit(initialUnit));
+  const [description, setDescription] = useState(product?.description ?? "");
 
   const [labelSize, setLabelSize] = useState(product?.label_size ?? LABEL_SIZES[0]);
   const [labelCount, setLabelCount] = useState("1");
+  /** Which code the label prints: "main", "extra:<id>" or "variant:<id>". */
+  const [labelChoice, setLabelChoice] = useState("main");
   const [printingLabel, setPrintingLabel] = useState(false);
 
   const [packaging, setPackaging] = useState(product?.packaging ?? "");
@@ -120,13 +138,12 @@ export function ProductFichePage({
   const [activeTab, setActiveTab] = useState<SecondaryTab>("packaging");
 
   const [extraBarcodes, setExtraBarcodes] = useState<ProductBarcodeRow[]>([]);
-  const [newExtraBarcode, setNewExtraBarcode] = useState("");
 
   const [recentMovements, setRecentMovements] = useState<StockMovementRow[]>([]);
   const [variants, setVariants] = useState<ProductVariantRow[]>([]);
   const [lastPurchase, setLastPurchase] = useState<{ supplierName: string | null; cost: number; date: string } | null>(null);
 
-  const [pointsReward] = useState(product?.points_reward ?? 0);
+  const [pointsReward, setPointsReward] = useState(String(product?.points_reward ?? 0));
   const [isActive, setIsActive] = useState(product?.is_active ?? true);
   const [saving, setSaving] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -192,11 +209,15 @@ export function ProductFichePage({
     setRecentMovements(data ?? []);
   }
 
-  /** Variants (product_variants) are a real, live SUMA Web feature Desktop
-   * doesn't manage yet — shown read-only here so a variant's own stock/
-   * barcode isn't invisible, without inventing variant CRUD in this pass. */
+  /** All variants of the product, active and inactive — managed in
+   * VariantsSection, and offered as label barcodes below. */
   async function loadVariants(productId: string) {
-    const { data, error } = await supabase.from("product_variants").select("*").eq("product_id", productId).order("variant_name");
+    const { data, error } = await supabase
+      .from("product_variants")
+      .select("*")
+      .eq("product_id", productId)
+      .eq("store_id", storeId)
+      .order("variant_name");
     if (error) return;
     setVariants(data ?? []);
   }
@@ -226,26 +247,23 @@ export function ProductFichePage({
     setLastPurchase({ supplierName, cost: Number(product?.purchase_price ?? 0), date: movement.created_at });
   }
 
-  async function addExtraBarcode() {
-    const code = newExtraBarcode.trim();
-    if (!code || !product) return;
-    const { error } = await supabase.from("product_barcodes").insert({ product_id: product.id, store_id: storeId, barcode: code });
-    if (error) return toast.error(mapProductError(error.message));
-    setNewExtraBarcode("");
-    void loadExtraBarcodes(product.id);
-  }
-
-  async function removeExtraBarcode(id: string) {
-    const { error } = await supabase.from("product_barcodes").delete().eq("id", id);
-    if (error) return toast.error(error.message);
-    if (product) void loadExtraBarcodes(product.id);
-  }
-
   function selectSaleMethod(method: SaleMethod) {
+    if (method === saleMethod) return;
     setSaleMethod(method);
-    if (method === "piece") setUnit("قطعة");
+    // Switching back to the product's own method restores its own unit
+    // (which may be one outside the lists) instead of a list default.
+    if (method === methodFromUnit(initialUnit)) setUnit(initialUnit);
+    else if (method === "piece") setUnit(PIECE_UNITS[0]);
     else if (method === "weight") setUnit(WEIGHT_UNITS[0]);
     else setUnit(MEASURE_UNITS[0]);
+  }
+
+  /** The current method's unit list, plus the product's own unit when it
+   * belongs to this method but isn't one of the known values. */
+  function unitOptions(method: SaleMethod): string[] {
+    const base = method === "piece" ? PIECE_UNITS : method === "weight" ? WEIGHT_UNITS : MEASURE_UNITS;
+    const extras = [initialUnit, unit].filter((u) => u && methodFromUnit(u) === method && !base.includes(u));
+    return [...base, ...Array.from(new Set(extras))];
   }
 
   async function generateCode() {
@@ -269,39 +287,59 @@ export function ProductFichePage({
   }
 
   async function handleImageFile(file: File) {
-    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-    const isImage = file.type.startsWith("image/") || ext in IMAGE_MIME_BY_EXT;
-    if (!isImage) return toast.error("لازم تختار صورة.");
-    if (file.size > 5 * 1024 * 1024) return toast.error("الصورة كبيرة برشا (أقصى 5 ميغا).");
     setUploadingImage(true);
-    const path = `${storeId}/${crypto.randomUUID()}.${ext}`;
-    const { error } = await supabase.storage
-      .from("product-images")
-      .upload(path, file, { upsert: true, contentType: file.type || IMAGE_MIME_BY_EXT[ext] || "application/octet-stream" });
+    const res = await uploadProductImage(storeId, file);
     setUploadingImage(false);
-    if (error) return toast.error(error.message || "ما قدرناش نرفعو الصورة.");
-    const { data } = supabase.storage.from("product-images").getPublicUrl(path);
-    setImageUrl(data.publicUrl);
+    if (!res.ok) return toast.error(res.error);
+    setImageUrl(res.url);
+  }
+
+  /** Client-side validation mirroring SUMA Web's product schema; returns
+   * the first problem as an Arabic message, or null. */
+  function validate(): string | null {
+    const trimmedName = name.trim();
+    if (!trimmedName) return "لازم اسم للمنتج.";
+    if (trimmedName.length > NAME_MAX) return `اسم المنتج أطول من ${NAME_MAX} حرف.`;
+    if (internalCode.trim().length > INTERNAL_CODE_MAX) return `الكود الداخلي أطول من ${INTERNAL_CODE_MAX} حرف.`;
+    const code = validateBarcode(barcode);
+    if (!code.ok) return code.error;
+    if (!priceLocked) {
+      const selling = optionalNumber(sellingPrice);
+      if (selling === null) return "سعر البيع مطلوب.";
+      if (!Number.isFinite(selling) || selling < 0 || selling > PRICE_MAX) return "سعر البيع لازم يكون رقم بين 0 و 99,999,999.";
+    }
+    const purchase = optionalNumber(purchasePrice);
+    if (purchase !== null && (!Number.isFinite(purchase) || purchase < 0 || purchase > PRICE_MAX)) {
+      return "سعر الشراء لازم يكون رقم بين 0 و 99,999,999.";
+    }
+    const tax = optionalNumber(taxRate);
+    if (tax !== null && (!Number.isFinite(tax) || tax < 0 || tax > 100)) return "الضريبة لازم تكون بين 0 و 100.";
+    const low = optionalNumber(lowStockThreshold);
+    if (low !== null && (!Number.isFinite(low) || low < 0)) return "حد تنبيه المخزون لازم يكون 0 أو أكثر.";
+    const stock = optionalNumber(stockQuantity);
+    if (stock !== null && !Number.isFinite(stock)) return "المخزون لازم يكون رقم.";
+    const points = optionalNumber(pointsReward);
+    if (points !== null && (!Number.isInteger(points) || points < 0 || points > POINTS_MAX)) {
+      return "نقاط الولاء لازم تكون عدد صحيح بين 0 و 10000.";
+    }
+    if (description.trim().length > DESCRIPTION_MAX) return `الوصف أطول من ${DESCRIPTION_MAX} حرف.`;
+    return null;
   }
 
   async function save() {
+    if (!isOnline) return toast.error("حفظ المنتج يحتاج اتصالاً بالإنترنت.");
+    if (!canWrite) return toast.error(product ? "تعديل المنتجات يحتاج صلاحية إدارة المنتجات." : "إضافة منتج جديد محجوزة لصاحب المحل والمدير.");
+    const problem = validate();
+    if (problem) return toast.error(problem);
     const trimmedName = name.trim();
-    if (!trimmedName) return toast.error("لازم اسم للمنتج.");
-    const selling = Number(sellingPrice);
-    if (!(selling >= 0)) return toast.error("سعر البيع لازم يكون رقم.");
 
     const trimmedBarcode = barcode.trim() || null;
-    if (trimmedBarcode) {
-      const { data: aliasHit } = await supabase
-        .from("product_barcodes")
-        .select("product_id, products(name)")
-        .eq("store_id", storeId)
-        .eq("barcode", trimmedBarcode)
-        .neq("product_id", product?.id ?? "00000000-0000-0000-0000-000000000000")
-        .maybeSingle();
-      if (aliasHit) {
-        const otherName = (aliasHit as unknown as { products: { name: string } | null }).products?.name ?? "";
-        return toast.error(`هذا الباركود مستخدم بالفعل كباركود إضافي لمنتج آخر: ${otherName}.`);
+    setSaving(true);
+    if (trimmedBarcode && trimmedBarcode !== (product?.barcode ?? null)) {
+      const conflict = await findBarcodeConflict(storeId, trimmedBarcode, { productId: product?.id ?? null }, product?.id ?? null);
+      if (conflict) {
+        setSaving(false);
+        return toast.error(conflict);
       }
     }
 
@@ -312,7 +350,7 @@ export function ProductFichePage({
     // absolute value, only ever as a server-computed delta via
     // adjust_stock (same rule the المخزون screen's own settle modal and
     // quick +/- follow).
-    const basePayload = {
+    const basePayload: Partial<ProductRow> = {
       store_id: storeId,
       name: trimmedName,
       barcode: trimmedBarcode,
@@ -321,33 +359,37 @@ export function ProductFichePage({
       brand: brand.trim() || null,
       product_type: productType.trim() || null,
       image_url: imageUrl,
-      purchase_price: purchasePrice.trim() ? Number(purchasePrice) : null,
-      selling_price: selling,
-      tax_rate: taxRate.trim() ? Number(taxRate) : null,
-      low_stock_threshold: lowStockThreshold.trim() ? Number(lowStockThreshold) : 5,
+      purchase_price: optionalNumber(purchasePrice),
+      tax_rate: optionalNumber(taxRate),
+      low_stock_threshold: optionalNumber(lowStockThreshold) ?? 5,
       location_in_store: locationInStore.trim() || null,
-      unit,
       label_size: labelSize || null,
       packaging: packaging.trim() || null,
       specifications: specifications.trim() || null,
       sizes: sizes.trim() || null,
       expiry_date: expiryDate.trim() || null,
-      points_reward: pointsReward,
+      description: description.trim() || null,
+      points_reward: optionalNumber(pointsReward) ?? 0,
       is_active: isActive,
     };
+    // Never send a price the user isn't allowed to change (the owner-only
+    // trigger would reject the whole update even with the same value
+    // mistyped), and never rewrite an existing product's unit that the
+    // user didn't touch — e.g. a SUMA Web unit outside PC's lists.
+    if (!priceLocked) basePayload.selling_price = optionalNumber(sellingPrice);
+    if (!product || unit !== initialUnit) basePayload.unit = unit;
 
-    setSaving(true);
     const { data: savedRow, error } = product
       ? await supabase.from("products").update(basePayload).eq("id", product.id).eq("store_id", storeId).select().single()
-      : await supabase.from("products").insert({ ...basePayload, stock_quantity: stockQuantity.trim() ? Number(stockQuantity) : 0 }).select().single();
+      : await supabase.from("products").insert({ ...basePayload, stock_quantity: optionalNumber(stockQuantity) ?? 0 }).select().single();
     if (error) {
       setSaving(false);
-      return toast.error(mapProductError(error.message));
+      return toast.error(mapProductError(error));
     }
 
     let finalRow = savedRow as ProductRow;
     if (product) {
-      const newQty = stockQuantity.trim() ? Number(stockQuantity) : 0;
+      const newQty = optionalNumber(stockQuantity) ?? 0;
       const delta = newQty - Number(product.stock_quantity);
       if (Number.isFinite(delta) && delta !== 0) {
         const { data: adjustedRow, error: adjustError } = await adjustStock({
@@ -372,11 +414,28 @@ export function ProductFichePage({
     onSaved(finalRow);
   }
 
+  // Every code this product answers to, as label options: the main
+  // barcode (as currently typed), each extra barcode, each active variant
+  // with a barcode (its label also carries the variant name).
+  const labelOptions = useMemo(() => {
+    const options: Array<{ key: string; label: string; value: string; variantName: string | null }> = [];
+    if (barcode.trim()) options.push({ key: "main", label: `الأساسي — ${barcode.trim()}`, value: barcode.trim(), variantName: null });
+    for (const b of extraBarcodes) {
+      options.push({ key: `extra:${b.id}`, label: `إضافي — ${b.barcode}${b.note ? ` (${b.note})` : ""}`, value: b.barcode, variantName: null });
+    }
+    for (const v of variants) {
+      if (!v.is_active || !v.barcode) continue;
+      options.push({ key: `variant:${v.id}`, label: `تنويعة ${v.variant_name} — ${v.barcode}`, value: v.barcode, variantName: v.variant_name });
+    }
+    return options;
+  }, [barcode, extraBarcodes, variants]);
+  const labelTarget = labelOptions.find((o) => o.key === labelChoice) ?? labelOptions[0] ?? null;
+
   // Real, scannable CODE128 rendering (Phase A item 2) — recomputed
   // synchronously (canvas-based, no network/async step) whenever the
-  // barcode value changes, so the preview below and the printed label
+  // chosen code changes, so the preview below and the printed label
   // always show the exact same image.
-  const barcodeDataUrl = useMemo(() => generateBarcodeDataUrl(barcode), [barcode]);
+  const barcodeDataUrl = useMemo(() => (labelTarget ? generateBarcodeDataUrl(labelTarget.value) : null), [labelTarget]);
 
   /** Prints `labelCount` copies of one label at the product's own
    * label_size (mm) via the shared offscreen-print IPC path (item 3) —
@@ -389,10 +448,12 @@ export function ProductFichePage({
       return;
     }
     const { widthMm, heightMm } = parseLabelSize(labelSize);
+    const price = optionalNumber(sellingPrice);
     const html = buildLabelHtml({
       productName: name.trim(),
-      price: sellingPrice.trim() ? Number(sellingPrice) : null,
-      barcodeValue: barcode.trim() || null,
+      variantName: labelTarget?.variantName ?? null,
+      price: price !== null && Number.isFinite(price) ? price : null,
+      barcodeValue: labelTarget?.value ?? null,
       barcodeDataUrl,
       widthMm,
       heightMm,
@@ -458,14 +519,14 @@ export function ProductFichePage({
 
               <div>
                 <Label htmlFor="f-name">اسم المنتج *</Label>
-                <Input id="f-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={160} />
+                <Input id="f-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={NAME_MAX} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label htmlFor="f-ref">المرجع (الكود الداخلي)</Label>
                   <div className="flex gap-2">
-                    <Input id="f-ref" value={internalCode} onChange={(e) => setInternalCode(e.target.value)} dir="ltr" />
+                    <Input id="f-ref" value={internalCode} onChange={(e) => setInternalCode(e.target.value)} dir="ltr" maxLength={INTERNAL_CODE_MAX} />
                     <Button type="button" variant="outline" size="icon" disabled={generatingCode} onClick={() => void generateCode()}>
                       {generatingCode ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Wand2 className="size-4" aria-hidden />}
                     </Button>
@@ -473,7 +534,10 @@ export function ProductFichePage({
                 </div>
                 <div>
                   <Label htmlFor="f-barcode">Barcode</Label>
-                  <Input id="f-barcode" value={barcode} onChange={(e) => setBarcode(e.target.value)} inputMode="numeric" dir="ltr" />
+                  <Input id="f-barcode" value={barcode} onChange={(e) => setBarcode(e.target.value)} dir="ltr" maxLength={64} />
+                  {!validateBarcode(barcode).ok && (
+                    <p className="mt-1 text-[11px] text-destructive">حروف لاتينية وأرقام و - و _ فقط.</p>
+                  )}
                 </div>
               </div>
 
@@ -499,6 +563,22 @@ export function ProductFichePage({
                 <Label htmlFor="f-type">نوع المنتج</Label>
                 <Input id="f-type" value={productType} onChange={(e) => setProductType(e.target.value)} maxLength={80} placeholder="مثلًا: منتج ألبان، مشروب غازي..." />
               </div>
+
+              <div>
+                <Label htmlFor="f-desc">الوصف</Label>
+                <textarea
+                  id="f-desc"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={2}
+                  maxLength={DESCRIPTION_MAX}
+                  placeholder="وصف قصير يظهر للزبائن (اختياري)"
+                  className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+                <p className="mt-0.5 text-end text-[10px] text-muted-foreground num">
+                  {description.length}/{DESCRIPTION_MAX}
+                </p>
+              </div>
             </div>
           </section>
 
@@ -509,12 +589,28 @@ export function ProductFichePage({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label htmlFor="f-purchase">سعر الشراء (دج)</Label>
-                  <Input id="f-purchase" type="number" step="0.01" min="0" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+                  <Input id="f-purchase" type="number" step="0.01" min="0" max={PRICE_MAX} value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
                 </div>
                 <div>
                   <Label htmlFor="f-selling">سعر البيع (دج) *</Label>
-                  <Input id="f-selling" type="number" step="0.01" min="0" value={sellingPrice} onChange={(e) => setSellingPrice(e.target.value)} />
+                  <Input
+                    id="f-selling"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={PRICE_MAX}
+                    value={sellingPrice}
+                    disabled={priceLocked}
+                    title={priceLocked ? "تغيير السعر محجوز لصاحب المحل" : undefined}
+                    onChange={(e) => setSellingPrice(e.target.value)}
+                  />
+                  {priceLocked && <p className="mt-1 text-[11px] text-muted-foreground">تغيير السعر محجوز لصاحب المحل</p>}
                 </div>
+              </div>
+              <div>
+                <Label htmlFor="f-points">نقاط الولاء لكل وحدة</Label>
+                <Input id="f-points" type="number" step="1" min="0" max={POINTS_MAX} value={pointsReward} onChange={(e) => setPointsReward(e.target.value)} />
+                <p className="mt-1 text-[11px] text-muted-foreground">تُضاف لرصيد الزبون عند كل بيع لهذا المنتج (0 = بدون نقاط).</p>
               </div>
               <div>
                 <Label htmlFor="f-tax">الضريبة (%)</Label>
@@ -579,65 +675,32 @@ export function ProductFichePage({
                   حسب وحدة القياس
                 </Button>
               </div>
-              {saleMethod === "weight" && (
-                <div>
-                  <Label htmlFor="f-unit-weight">وحدة الوزن</Label>
-                  <select id="f-unit-weight" value={unit} onChange={(e) => setUnit(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
-                    {WEIGHT_UNITS.map((u) => (
-                      <option key={u} value={u}>
-                        {u}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {saleMethod === "measure" && (
-                <div>
-                  <Label htmlFor="f-unit-measure">وحدة القياس</Label>
-                  <select id="f-unit-measure" value={unit} onChange={(e) => setUnit(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
-                    {MEASURE_UNITS.map((u) => (
-                      <option key={u} value={u}>
-                        {u}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <div>
+                <Label htmlFor="f-unit">
+                  {saleMethod === "piece" ? "وحدة البيع" : saleMethod === "weight" ? "وحدة الوزن" : "وحدة القياس"}
+                </Label>
+                <select id="f-unit" value={unit} onChange={(e) => setUnit(e.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
+                  {unitOptions(saleMethod).map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </section>
 
           {/* الباركود */}
-          <section className="surface overflow-hidden p-0">
-            <h2 className="bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">باركودات إضافية</h2>
-            <div className="p-4">
-              {!product ? (
-                <p className="text-xs text-muted-foreground">احفظ المنتج أولًا لتقدر تضيف باركودات إضافية له.</p>
-              ) : (
-                <>
-                  <div className="flex gap-2">
-                    <Input value={newExtraBarcode} onChange={(e) => setNewExtraBarcode(e.target.value)} placeholder="باركود إضافي..." dir="ltr" inputMode="numeric" />
-                    <Button type="button" variant="outline" onClick={() => void addExtraBarcode()}>
-                      <Plus className="size-4" aria-hidden />
-                    </Button>
-                  </div>
-                  {extraBarcodes.length > 0 && (
-                    <ul className="mt-2 divide-y divide-border">
-                      {extraBarcodes.map((b) => (
-                        <li key={b.id} className="flex items-center justify-between py-1.5 text-sm">
-                          <span className="num" dir="ltr">
-                            {b.barcode}
-                          </span>
-                          <button type="button" className="text-muted-foreground hover:text-destructive" onClick={() => void removeExtraBarcode(b.id)}>
-                            <Trash2 className="size-4" aria-hidden />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </>
-              )}
-            </div>
-          </section>
+          <ExtraBarcodesSection
+            storeId={storeId}
+            productId={product?.id ?? null}
+            rows={extraBarcodes}
+            onRowsChange={setExtraBarcodes}
+            canManage={perms.canManageProducts}
+            disabledReason={offlineReason}
+          />
+
+          {product && <PriceHistorySection productId={product.id} />}
 
           {/* آخر الحركات والمشتريات — read-only, only meaningful once the
               product actually exists and has history. */}
@@ -676,31 +739,15 @@ export function ProductFichePage({
             </section>
           )}
 
-          {/* Variants (product_variants) — read-only: a real, live SUMA
-              Web feature this pass doesn't add management UI for, but a
-              variant's own stock/barcode shouldn't be invisible if some
-              already exist for this product. */}
-          {product && variants.length > 0 && (
-            <section className="surface overflow-hidden p-0">
-              <h2 className="bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">التنويعات (Variants)</h2>
-              <div className="p-4">
-                <ul className="grid gap-1.5">
-                  {variants.map((v) => (
-                    <li key={v.id} className="flex items-center justify-between gap-2 text-xs">
-                      <span className="font-medium">{v.variant_name}</span>
-                      <span className="num text-muted-foreground" dir="ltr">
-                        {v.barcode ?? "—"}
-                      </span>
-                      <span className="num text-muted-foreground">{v.stock_quantity ?? product.stock_quantity}</span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="mt-2 text-[11px] text-muted-foreground">
-                  إدارة التنويعات (إضافة/تعديل) متوفرة على SUMA Web فقط حاليًا — معروضة هنا للاطلاع.
-                </p>
-              </div>
-            </section>
-          )}
+          <VariantsSection
+            storeId={storeId}
+            productId={product?.id ?? null}
+            variants={variants}
+            onVariantsChange={setVariants}
+            canManage={perms.canManageProducts}
+            canDelete={perms.isAdmin}
+            disabledReason={offlineReason}
+          />
 
           {/* الملصق والطباعة */}
           <section className="surface overflow-hidden p-0">
@@ -722,7 +769,24 @@ export function ProductFichePage({
                   <Input id="f-label-count" type="number" min="1" max="200" value={labelCount} onChange={(e) => setLabelCount(e.target.value)} />
                 </div>
               </div>
-              {barcode.trim() && (
+              {labelOptions.length > 1 && (
+                <div>
+                  <Label htmlFor="f-label-code">الباركود المطبوع</Label>
+                  <select
+                    id="f-label-code"
+                    value={labelTarget?.key ?? ""}
+                    onChange={(e) => setLabelChoice(e.target.value)}
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    {labelOptions.map((o) => (
+                      <option key={o.key} value={o.key}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {labelTarget && (
                 <div className="grid place-items-center rounded-lg border border-dashed border-border bg-muted/40 p-2">
                   {barcodeDataUrl ? (
                     <img src={barcodeDataUrl} alt="معاينة الباركود" className="max-h-16" />
@@ -736,7 +800,8 @@ export function ProductFichePage({
                 طباعة {Math.max(1, Math.min(200, Number(labelCount) || 1)) > 1 ? `(${labelCount} نسخة)` : ""}
               </Button>
               <p className="text-xs text-muted-foreground">
-                يطبع الملصق باركودًا حقيقيًا قابلاً للمسح الضوئي بمقاس {labelSize}، بالإضافة لاسم المنتج والسعر.
+                يطبع الملصق باركودًا حقيقيًا قابلاً للمسح الضوئي بمقاس {labelSize}، بالإضافة لاسم المنتج
+                {labelTarget?.variantName ? ` والتنويعة (${labelTarget.variantName})` : ""} والسعر.
               </p>
             </div>
           </section>
@@ -800,11 +865,21 @@ export function ProductFichePage({
         </div>
       </div>
 
-      <footer className="flex items-center gap-2 border-t border-border p-4">
+      <footer className="flex flex-wrap items-center gap-2 border-t border-border p-4">
+        {(!isOnline || !canWrite) && (
+          <p className="flex w-full items-center gap-1.5 text-xs text-muted-foreground">
+            {!isOnline && <CloudOff className="size-3.5 shrink-0" aria-hidden />}
+            {!isOnline
+              ? "غير متصل — حفظ المنتج والباركودات والتنويعات يحتاج اتصالاً بالإنترنت."
+              : product
+                ? "تعديل المنتجات يحتاج صلاحية إدارة المنتجات."
+                : "إضافة منتج جديد محجوزة لصاحب المحل والمدير."}
+          </p>
+        )}
         <Button variant="outline" className="flex-1" onClick={onClose}>
           إلغاء
         </Button>
-        <Button className="flex-1" size="lg" disabled={saving} onClick={() => void save()}>
+        <Button className="flex-1" size="lg" disabled={saving || !isOnline || !canWrite} onClick={() => void save()}>
           {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
           حفظ المنتج
         </Button>
