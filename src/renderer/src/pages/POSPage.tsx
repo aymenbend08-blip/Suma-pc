@@ -37,6 +37,11 @@ const BARCODE_LIKE = /^[0-9]{6,}$/;
 type CartLine = {
   key: string;
   productId: string | null;
+  /** Set when the line was scanned through a variant barcode — a trace
+   * only: the variant shares the base product's price and stock. Lines of
+   * the same product with different variants stay separate. */
+  variantId?: string | null;
+  variantName?: string | null;
   name: string;
   unitPrice: number;
   quantity: number;
@@ -58,8 +63,16 @@ type HeldSale = {
 const HELD_KEY_PREFIX = "suma-pos-held-sales:";
 
 function cartToReceiptItems(cart: CartLine[]): ReceiptItem[] {
-  return cart.map((l) => ({ name: l.name, quantity: l.quantity, unitPrice: l.unitPrice, lineTotal: l.unitPrice * l.quantity }));
+  return cart.map((l) => ({
+    name: l.name,
+    variantName: l.variantName ?? null,
+    quantity: l.quantity,
+    unitPrice: l.unitPrice,
+    lineTotal: l.unitPrice * l.quantity,
+  }));
 }
+
+const NO_PRICE_MESSAGE = "المنتج بدون سعر بيع — حدّد سعره أولاً";
 
 // Minimal typing for the Web Speech API (not in TS's default DOM lib) —
 // same helper SUMA Web's pos.tsx uses for the exact same feature.
@@ -143,6 +156,10 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
   const [returnItems, setReturnItems] = useState<SaleItemRow[]>([]);
   const [returnQty, setReturnQty] = useState<Record<string, number>>({});
   const [returnSubmitting, setReturnSubmitting] = useState(false);
+  // One idempotency key per refund attempt: kept across a retry of the
+  // same selection (refund_sale returns the already-applied result instead
+  // of refunding twice), renewed when the selection changes or succeeds.
+  const [refundRequestId, setRefundRequestId] = useState(() => uuid());
 
   useEffect(() => {
     searchRef.current?.focus();
@@ -196,8 +213,14 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     let cancelled = false;
     void localDb.searchProducts(storeId, term).then((rows) => {
       if (cancelled) return;
+      // Barcode mode hides rows that matched by name only; a row matched
+      // through an extra or variant barcode (not visible on the product row
+      // itself) is kept.
+      const lowered = term.toLowerCase();
       const filtered =
-        searchMode === "barcode" ? rows.filter((p) => p.barcode?.includes(term)) : rows;
+        searchMode === "barcode"
+          ? rows.filter((p) => p.barcode?.includes(term) || !p.name.toLowerCase().includes(lowered))
+          : rows;
       setResults(filtered);
       setSearching(false);
     });
@@ -221,19 +244,27 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     };
   }, [customerQuery, storeId]);
 
-  function addToCart(p: ProductRow) {
+  function addToCart(p: ProductRow, variant: { id: string; name: string } | null = null) {
+    // record_sale rejects a product with no selling price — refuse it here
+    // instead of letting the whole checkout fail later.
+    if (p.selling_price === null || p.selling_price === undefined) {
+      toast.error(`${NO_PRICE_MESSAGE}: ${p.name}`);
+      return;
+    }
+    const variantId = variant?.id ?? null;
     setCart((lines) => {
-      const existing = lines.find((l) => l.productId === p.id);
+      const sameLine = (l: CartLine) => l.productId === p.id && (l.variantId ?? null) === variantId;
+      const existing = lines.find(sameLine);
       if (existing) {
-        return lines.map((l) =>
-          l.productId === p.id ? { ...l, quantity: l.quantity + 1 } : l,
-        );
+        return lines.map((l) => (sameLine(l) ? { ...l, quantity: l.quantity + 1 } : l));
       }
       return [
         ...lines,
         {
           key: uuid(),
           productId: p.id,
+          variantId,
+          variantName: variant?.name ?? null,
           name: p.name,
           unitPrice: Number(p.selling_price),
           quantity: 1,
@@ -250,22 +281,29 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
   async function handleSearchEnter() {
     const term = search.trim();
     if (!term) return;
-    const exact = results.find((p) => p.barcode === term);
-    if (exact) return addToCart(exact);
+    // Exact code first, through the full 3-step resolution on the local
+    // mirror (main barcode -> extra barcode -> active variant barcode), so
+    // a scan works offline and a variant scan keeps its variant.
+    const hit = await localDb.findProductByBarcode(storeId, term);
+    if (hit) {
+      if (!hit.is_active) {
+        toast.error(`المنتج «${hit.name}» غير مفعّل.`);
+        return;
+      }
+      return addToCart(
+        hit,
+        hit.matched_variant_id ? { id: hit.matched_variant_id, name: hit.matched_variant_name ?? "" } : null,
+      );
+    }
     if (results.length === 1) return addToCart(results[0]);
-
-    // Not a primary barcode / not narrowed to one match yet — check
-    // product_barcodes aliases (a product can have more than one barcode),
-    // also against the local mirror so a scan works offline too.
-    const product = await localDb.findProductByBarcode(storeId, term);
-    if (product) return addToCart(product);
 
     // A barcode-shaped term that matched nothing at all — offer to add it
     // as a new product right here, instead of just failing the scan.
     // Creating a product is an online-only, admin-ish action (same
     // reasoning as everywhere else catalog writes happen in this app), so
     // this is gated on both permission and connectivity.
-    if (BARCODE_LIKE.test(term) && perms.canManageProducts && isOnline) {
+    // Creating a product is store-admin only (RLS products_admin_insert).
+    if (BARCODE_LIKE.test(term) && perms.isAdmin && isOnline) {
       void openFicheForBarcode(term);
       return;
     }
@@ -364,7 +402,12 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
   // record_sale()'s 20260919200000 migration), so this never blocks
   // checkout. Only meaningful while offline: online, the server is the
   // authoritative source and this locally-cached figure can be stale.
-  const insufficientLines = !isOnline ? cart.filter((l) => !l.isCustom && l.quantity > l.stockQuantity) : [];
+  // Variant lines share the base product's stock, so compare the product's
+  // total quantity across all its lines.
+  const qtyByProduct = new Map<string, number>();
+  for (const l of cart) if (l.productId) qtyByProduct.set(l.productId, (qtyByProduct.get(l.productId) ?? 0) + l.quantity);
+  const isShort = (l: CartLine) => !l.isCustom && !!l.productId && (qtyByProduct.get(l.productId) ?? 0) > l.stockQuantity;
+  const insufficientLines = !isOnline ? cart.filter(isShort) : [];
   const blockedOffline = !isOnline && hasCustomItem;
 
   async function checkout() {
@@ -379,7 +422,11 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
       _items: cart.map((l) =>
         l.isCustom
           ? { name: l.name, unit_price: l.unitPrice, quantity: l.quantity }
-          : { product_id: l.productId as string, quantity: l.quantity },
+          : {
+              product_id: l.productId as string,
+              ...(l.variantId ? { variant_id: l.variantId } : {}),
+              quantity: l.quantity,
+            },
       ),
       _discount: discount,
       _payment_method: paymentMethod,
@@ -414,7 +461,7 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
         storeId,
         cashierId: session!.user.id,
         cashierName: session!.user.email ?? null,
-        items: cart.map((l) => ({ productId: l.productId as string, quantity: l.quantity })),
+        items: cart.map((l) => ({ productId: l.productId as string, quantity: l.quantity, variantId: l.variantId ?? null })),
         discount,
         paymentMethod,
         customerId: customer?.id ?? null,
@@ -548,6 +595,7 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
     const initial: Record<string, number> = {};
     for (const item of items) initial[item.id] = 0;
     setReturnQty(initial);
+    setRefundRequestId(uuid());
   }
 
   async function submitReturn() {
@@ -559,13 +607,24 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
       toast.error("حدّد كمية الإرجاع لصنف واحد على الأقل.");
       return;
     }
+    if (!perms.canRefund) {
+      toast.error("الإرجاع يحتاج صلاحية الاسترجاع.");
+      return;
+    }
     setReturnSubmitting(true);
-    const { error } = await refundSale({ _sale_id: returnSale.id, _store_id: storeId, _items: items });
+    const { error } = await refundSale({
+      _sale_id: returnSale.id,
+      _store_id: storeId,
+      _items: items,
+      _client_request_id: refundRequestId,
+    });
     setReturnSubmitting(false);
     if (error) {
+      // Same key is reused if the cashier retries this exact selection.
       toast.error(error.message);
       return;
     }
+    setRefundRequestId(uuid());
     toast.success("تم تسجيل الإرجاع بنجاح.");
     setShowReturn(false);
     setReturnSale(null);
@@ -734,7 +793,8 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                     >
                       <span className="truncate">{p.name}</span>
                       <span className="shrink-0 text-muted-foreground num">
-                        {formatDA(p.selling_price)} · مخزون {p.stock_quantity}
+                        {p.selling_price === null ? <span className="text-destructive">بدون سعر</span> : formatDA(p.selling_price)} · مخزون{" "}
+                        {p.stock_quantity}
                       </span>
                     </button>
                   </li>
@@ -762,7 +822,7 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                   </tr>
                 ) : (
                   cart.map((l, i) => {
-                    const insufficient = !l.isCustom && !isOnline && l.quantity > l.stockQuantity;
+                    const insufficient = !isOnline && isShort(l);
                     return (
                       <tr
                         key={l.key}
@@ -778,6 +838,9 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                               <span className="ms-1 text-[10px] text-muted-foreground">(بدون باركود)</span>
                             )}
                           </span>
+                          {l.variantName && (
+                            <span className="block text-xs font-medium text-[var(--primary)]">{l.variantName}</span>
+                          )}
                           {insufficient && (
                             <span className="text-xs font-medium text-destructive">
                               غير متوفر محليًا — الموجود: {l.stockQuantity}
@@ -904,7 +967,16 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
               onClick={() => setShowCustomerPicker((v) => !v)}
             >
               <UserRound className="size-4" aria-hidden />
-              {customer ? customer.full_name : "بدون زبون (اختياري)"}
+              {customer ? (
+                <span className="flex min-w-0 flex-col items-start leading-tight">
+                  <span className="truncate">{customer.full_name}</span>
+                  <span className="text-[10px] font-normal text-muted-foreground num">
+                    نقاط: {Number(customer.points_balance).toLocaleString("fr-FR")} · دين: {formatDA(customer.credit_balance)}
+                  </span>
+                </span>
+              ) : (
+                "بدون زبون (اختياري)"
+              )}
               {customer && (
                 <X
                   className="ms-auto size-4"
@@ -963,7 +1035,12 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                             setCustomerQuery("");
                           }}
                         >
-                          {c.full_name} — {c.phone}
+                          <span className="block">
+                            {c.full_name} — <span className="num">{c.phone}</span>
+                          </span>
+                          <span className="block text-[10px] text-muted-foreground num">
+                            نقاط: {Number(c.points_balance).toLocaleString("fr-FR")} · دين: {formatDA(c.credit_balance)}
+                          </span>
                         </button>
                       </li>
                     ))}
@@ -1160,7 +1237,10 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                     const maxQty = item.quantity - item.refunded_quantity;
                     return (
                       <li key={item.id} className="flex items-center gap-2 py-2 text-sm">
-                        <span className="flex-1 truncate">{item.product_name}</span>
+                        <span className="flex-1 truncate">
+                          {item.product_name}
+                          {item.variant_name && <span className="ms-1 text-xs text-[var(--primary)]">({item.variant_name})</span>}
+                        </span>
                         <span className="text-xs text-muted-foreground num">
                           ({item.quantity - item.refunded_quantity} متاح)
                         </span>
@@ -1170,19 +1250,24 @@ export function POSPage({ autoOpenReturn = false }: { autoOpenReturn?: boolean }
                           max={maxQty}
                           disabled={maxQty <= 0}
                           value={returnQty[item.id] || ""}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            // A different selection is a different attempt.
+                            setRefundRequestId(uuid());
                             setReturnQty((q) => ({
                               ...q,
                               [item.id]: Math.max(0, Math.min(maxQty, Number(e.target.value) || 0)),
-                            }))
-                          }
+                            }));
+                          }}
                           className="w-16"
                         />
                       </li>
                     );
                   })}
                 </ul>
-                <Button className="mt-3" disabled={returnSubmitting} onClick={() => void submitReturn()}>
+                {!perms.canRefund && (
+                  <p className="mt-2 text-xs text-muted-foreground">الإرجاع يحتاج صلاحية الاسترجاع — اطلبها من صاحب المحل.</p>
+                )}
+                <Button className="mt-3" disabled={returnSubmitting || !perms.canRefund} onClick={() => void submitReturn()}>
                   {returnSubmitting && <Loader2 className="size-4 animate-spin" aria-hidden />}
                   تأكيد الإرجاع
                 </Button>

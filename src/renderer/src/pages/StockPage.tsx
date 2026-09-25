@@ -21,6 +21,7 @@ import { adjustStock, applyStocktake, type AdjustStockArgs } from "@/lib/rpc";
 import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA, formatDate, formatDateTime } from "@/lib/format";
+import { findProductIdsByAltBarcode, sanitizeSearchTerm } from "@/lib/productBarcodes";
 import type {
   CategoryRow,
   ProductRow,
@@ -151,17 +152,12 @@ export function StockPage() {
   async function loadProducts() {
     setLoading(true);
     const from = page * PAGE_SIZE;
-    const term = debouncedSearch.replace(/[%,]/g, " ").trim();
+    const term = sanitizeSearchTerm(debouncedSearch);
 
-    let aliasIds: string[] | null = null;
-    if (term && /^[A-Za-z0-9\-_]+$/.test(term)) {
-      const { data: aliasRows } = await supabase
-        .from("product_barcodes")
-        .select("product_id")
-        .eq("store_id", storeId)
-        .ilike("barcode", `%${term}%`);
-      aliasIds = (aliasRows ?? []).map((r) => r.product_id);
-    }
+    // A scanned/typed extra or variant barcode resolves to its product:
+    // one capped id lookup across product_barcodes + product_variants,
+    // OR'ed into the single list query (no per-row requests).
+    const aliasIds = term ? await findProductIdsByAltBarcode(storeId, term) : [];
 
     let query = supabase
       .from("products")
@@ -171,7 +167,7 @@ export function StockPage() {
 
     if (term) {
       const orParts = [`name.ilike.%${term}%`, `barcode.ilike.%${term}%`, `internal_code.ilike.%${term}%`];
-      if (aliasIds && aliasIds.length > 0) orParts.push(`id.in.(${aliasIds.join(",")})`);
+      if (aliasIds.length > 0) orParts.push(`id.in.(${aliasIds.join(",")})`);
       query = query.or(orParts.join(","));
     }
     if (categoryId) query = query.eq("category_id", categoryId);
@@ -407,7 +403,7 @@ export function StockPage() {
 
       <div className="surface flex flex-wrap items-end gap-3 p-4">
         <div className="min-w-48 flex-1">
-          <Label htmlFor="q">البحث بالاسم / الباركود / الكود الداخلي</Label>
+          <Label htmlFor="q">البحث بالاسم / الباركود (أساسي، إضافي، تنويعة) / الكود الداخلي</Label>
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 end-3 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
             <Input id="q" value={search} onChange={(e) => setSearch(e.target.value)} className="pe-9" placeholder="حليب، 1234567890123، S123456" />
@@ -685,9 +681,12 @@ export function StockPage() {
           product={ficheTarget}
           categories={categories}
           onClose={() => setFicheTarget(null)}
-          onSaved={() => {
+          onSaved={(saved) => {
             setFicheTarget(null);
-            void loadProducts();
+            // Patch in place when no filter could have changed the row's
+            // membership on this page; otherwise re-run the list query.
+            if (filter === "all" && !categoryId) setRows((prev) => prev.map((r) => (r.id === saved.id ? saved : r)));
+            else void loadProducts();
           }}
         />
       )}

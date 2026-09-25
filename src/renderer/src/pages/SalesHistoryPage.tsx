@@ -6,6 +6,7 @@ import { refundSale } from "@/lib/rpc";
 import { printSaleReceipt } from "@/lib/printReceipt";
 import { useStore } from "@/context/StoreContext";
 import { formatDA, formatDateTime } from "@/lib/format";
+import { uuid } from "@/lib/uuid";
 import type { CustomerRow, SaleItemRow, SaleRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,6 +48,9 @@ export function SalesHistoryPage() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [returnQty, setReturnQty] = useState<Record<string, number>>({});
   const [refunding, setRefunding] = useState(false);
+  // One idempotency key per refund attempt — reused if the same selection
+  // is retried after a failure, renewed when the selection changes.
+  const [refundRequestId, setRefundRequestId] = useState(() => uuid());
   const [printing, setPrinting] = useState(false);
 
   async function load() {
@@ -138,6 +142,7 @@ export function SalesHistoryPage() {
     const initial: Record<string, number> = {};
     for (const item of data ?? []) initial[item.id] = 0;
     setReturnQty(initial);
+    setRefundRequestId(uuid());
   }
 
   async function submitRefund() {
@@ -150,12 +155,18 @@ export function SalesHistoryPage() {
       return;
     }
     setRefunding(true);
-    const { data, error } = await refundSale({ _sale_id: selected.id, _store_id: storeId, _items: items });
+    const { data, error } = await refundSale({
+      _sale_id: selected.id,
+      _store_id: storeId,
+      _items: items,
+      _client_request_id: refundRequestId,
+    });
     setRefunding(false);
     if (error) {
       toast.error(error.message);
       return;
     }
+    setRefundRequestId(uuid());
     toast.success("تم تسجيل الإرجاع بنجاح.");
     if (data) {
       setSelected(data);
@@ -170,7 +181,13 @@ export function SalesHistoryPage() {
     const res = await printSaleReceipt({
       store: active,
       sale,
-      items: items.map((i) => ({ name: i.product_name, quantity: Number(i.quantity), unitPrice: Number(i.unit_price), lineTotal: Number(i.line_total) })),
+      items: items.map((i) => ({
+        name: i.product_name,
+        variantName: i.variant_name,
+        quantity: Number(i.quantity),
+        unitPrice: Number(i.unit_price),
+        lineTotal: Number(i.line_total),
+      })),
       customerName: sale.customer_id ? (customerNames[sale.customer_id] ?? null) : null,
     });
     setPrinting(false);
@@ -340,6 +357,7 @@ export function SalesHistoryPage() {
                       <li key={item.id} className="flex items-center gap-2 py-2 text-sm">
                         <span className="flex-1 truncate">
                           {item.product_name}
+                          {item.variant_name && <span className="ms-1 text-xs font-medium text-[var(--primary)]">({item.variant_name})</span>}
                           <span className="ms-1 text-xs text-muted-foreground num">
                             × {item.quantity} @ {formatDA(item.unit_price)}
                           </span>
@@ -352,9 +370,10 @@ export function SalesHistoryPage() {
                             max={maxQty}
                             disabled={maxQty <= 0}
                             value={returnQty[item.id] || ""}
-                            onChange={(e) =>
-                              setReturnQty((q) => ({ ...q, [item.id]: Math.max(0, Math.min(maxQty, Number(e.target.value) || 0)) }))
-                            }
+                            onChange={(e) => {
+                              setRefundRequestId(uuid());
+                              setReturnQty((q) => ({ ...q, [item.id]: Math.max(0, Math.min(maxQty, Number(e.target.value) || 0)) }));
+                            }}
                             className="w-14"
                             placeholder="إرجاع"
                           />

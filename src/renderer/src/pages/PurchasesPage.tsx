@@ -7,6 +7,8 @@ import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA, formatDateTime } from "@/lib/format";
 import { uuid } from "@/lib/uuid";
+import { localDb } from "@/lib/localdb";
+import { BARCODE_FORMAT, BARCODE_LOOKUP_MIN } from "@/lib/barcodeRules";
 import type { ProductRow, PurchaseOrderItemRow, PurchaseOrderRow, PurchaseOrderStatus, SupplierRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -577,6 +579,24 @@ function ProductSearchPicker({
 
   useEffect(() => setQuery(value), [value]);
 
+  // A scanned EXTRA or VARIANT barcode isn't on the product row itself —
+  // resolve it through the same 3-step lookup POS uses (local mirror, so it
+  // also works offline) and surface that product first.
+  const [aliasProductId, setAliasProductId] = useState<string | null>(null);
+  const storeId = products[0]?.store_id ?? null;
+  useEffect(() => {
+    const code = query.trim();
+    setAliasProductId(null);
+    if (!storeId || code.length < BARCODE_LOOKUP_MIN || !BARCODE_FORMAT.test(code)) return;
+    let cancelled = false;
+    void localDb.findProductByBarcode(storeId, code).then((hit) => {
+      if (!cancelled && hit) setAliasProductId(hit.id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [query, storeId]);
+
   useEffect(() => {
     function onOutside(e: MouseEvent) {
       if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
@@ -588,8 +608,11 @@ function ProductSearchPicker({
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return products.slice(0, 30);
-    return products.filter((p) => p.name.toLowerCase().includes(q) || (p.barcode ?? "").includes(q)).slice(0, 30);
-  }, [products, query]);
+    const direct = products.filter((p) => p.name.toLowerCase().includes(q) || (p.barcode ?? "").includes(q));
+    const alias = aliasProductId ? products.find((p) => p.id === aliasProductId) : undefined;
+    const merged = alias ? [alias, ...direct.filter((p) => p.id !== alias.id)] : direct;
+    return merged.slice(0, 30);
+  }, [products, query, aliasProductId]);
 
   return (
     <div ref={boxRef} className="relative flex-1">
