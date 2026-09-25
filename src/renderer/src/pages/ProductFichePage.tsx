@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { History, Loader2, Plus, Printer, Trash2, Wand2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { adjustStock } from "@/lib/rpc";
 import { formatDA, formatDateTime } from "@/lib/format";
+import { generateBarcodeDataUrl } from "@/lib/barcode";
+import { buildLabelHtml, parseLabelSize } from "@/lib/labels";
 import type {
   CategoryRow,
   ProductBarcodeRow,
@@ -109,7 +111,7 @@ export function ProductFichePage({
 
   const [labelSize, setLabelSize] = useState(product?.label_size ?? LABEL_SIZES[0]);
   const [labelCount, setLabelCount] = useState("1");
-  const [labelPrintCount, setLabelPrintCount] = useState(1);
+  const [printingLabel, setPrintingLabel] = useState(false);
 
   const [packaging, setPackaging] = useState(product?.packaging ?? "");
   const [specifications, setSpecifications] = useState(product?.specifications ?? "");
@@ -370,11 +372,35 @@ export function ProductFichePage({
     onSaved(finalRow);
   }
 
-  function printLabels() {
+  // Real, scannable CODE128 rendering (Phase A item 2) — recomputed
+  // synchronously (canvas-based, no network/async step) whenever the
+  // barcode value changes, so the preview below and the printed label
+  // always show the exact same image.
+  const barcodeDataUrl = useMemo(() => generateBarcodeDataUrl(barcode), [barcode]);
+
+  /** Prints `labelCount` copies of one label at the product's own
+   * label_size (mm) via the shared offscreen-print IPC path (item 3) —
+   * same helper item 1's receipt printing uses, not a parallel system. */
+  async function printLabels() {
     const count = Math.max(1, Math.min(200, Number(labelCount) || 1));
     if (!name.trim()) return toast.error("أدخل اسم المنتج أولًا.");
-    setLabelPrintCount(count);
-    setTimeout(() => window.print(), 50);
+    if (!window.suma?.printLabel) {
+      toast.error("الطباعة غير متوفرة في هذه البيئة.");
+      return;
+    }
+    const { widthMm, heightMm } = parseLabelSize(labelSize);
+    const html = buildLabelHtml({
+      productName: name.trim(),
+      price: sellingPrice.trim() ? Number(sellingPrice) : null,
+      barcodeValue: barcode.trim() || null,
+      barcodeDataUrl,
+      widthMm,
+      heightMm,
+    });
+    setPrintingLabel(true);
+    const res = await window.suma.printLabel(html, { widthMm, heightMm, copies: count });
+    setPrintingLabel(false);
+    if (!res.ok) toast.error("تعذرت طباعة الملصق — تحقق من الطابعة الافتراضية.");
   }
 
   const tabs: Array<{ key: SecondaryTab; label: string }> = [
@@ -696,12 +722,21 @@ export function ProductFichePage({
                   <Input id="f-label-count" type="number" min="1" max="200" value={labelCount} onChange={(e) => setLabelCount(e.target.value)} />
                 </div>
               </div>
-              <Button type="button" variant="outline" onClick={printLabels}>
-                <Printer className="size-4" aria-hidden />
-                طباعة
+              {barcode.trim() && (
+                <div className="grid place-items-center rounded-lg border border-dashed border-border bg-muted/40 p-2">
+                  {barcodeDataUrl ? (
+                    <img src={barcodeDataUrl} alt="معاينة الباركود" className="max-h-16" />
+                  ) : (
+                    <p className="text-xs text-destructive">تعذّر توليد باركود قابل للمسح لهذه القيمة.</p>
+                  )}
+                </div>
+              )}
+              <Button type="button" variant="outline" disabled={printingLabel} onClick={() => void printLabels()}>
+                {printingLabel ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Printer className="size-4" aria-hidden />}
+                طباعة {Math.max(1, Math.min(200, Number(labelCount) || 1)) > 1 ? `(${labelCount} نسخة)` : ""}
               </Button>
               <p className="text-xs text-muted-foreground">
-                الملصق يطبع اسم المنتج والسعر ورقم الباركود كنص — رسم باركود قابل للمسح الضوئي غير مدعوم بعد.
+                يطبع الملصق باركودًا حقيقيًا قابلاً للمسح الضوئي بمقاس {labelSize}، بالإضافة لاسم المنتج والسعر.
               </p>
             </div>
           </section>
@@ -775,19 +810,6 @@ export function ProductFichePage({
         </Button>
       </footer>
       </div>
-    </div>
-
-    {/* Print-only label sheet — hidden on screen, shown only in @media print (styles.css) */}
-    <div className="hidden print:grid print:grid-cols-2 print:gap-2">
-      {Array.from({ length: labelPrintCount }, (_, i) => (
-        <div key={i} className="border border-black p-2 text-center">
-          <p className="text-xs font-bold">{name}</p>
-          <p className="text-[10px] num" dir="ltr">
-            {barcode || "—"}
-          </p>
-          <p className="text-sm font-black num">{sellingPrice ? `${sellingPrice} دج` : ""}</p>
-        </div>
-      ))}
     </div>
     </>
   );

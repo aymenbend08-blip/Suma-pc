@@ -12,6 +12,11 @@ import { StockPage } from "@/pages/StockPage";
 import { PurchasesPage } from "@/pages/PurchasesPage";
 import { CustomersPage } from "@/pages/CustomersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { SalesHistoryPage } from "@/pages/SalesHistoryPage";
+import { CashRegisterPage } from "@/pages/CashRegisterPage";
+import { ExpensesPage } from "@/pages/ExpensesPage";
+import { EmployeesPage } from "@/pages/EmployeesPage";
+import { SettingsPage } from "@/pages/SettingsPage";
 import { SyncQueuePage } from "@/pages/SyncQueuePage";
 import { ComingSoonPage } from "@/pages/ComingSoonPage";
 import { Shell, type NavOptions, type Page } from "@/components/Shell";
@@ -62,6 +67,11 @@ function AuthedApp() {
     (page === "purchases" && !perms.canManageProducts) ||
     (page === "customers" && !perms.canManageCustomers) ||
     (page === "dashboard" && !perms.isAdmin) ||
+    (page === "sales-history" && !perms.isAdmin) ||
+    (page === "cash-register" && !perms.canUsePos) ||
+    (page === "expenses" && !perms.isAdmin) ||
+    (page === "employees" && !perms.isAdmin) ||
+    (page === "settings" && !perms.isAdmin) ||
     (page === "sync" && !perms.isAdmin)
       ? "home"
       : page;
@@ -78,6 +88,17 @@ function AuthedApp() {
           <CustomersPage debtOnly={navOpts.debtOnly} />
         )}
         {effectivePage === "dashboard" && perms.isAdmin && <DashboardPage />}
+        {effectivePage === "sales-history" && perms.isAdmin && <SalesHistoryPage />}
+        {effectivePage === "cash-register" && perms.canUsePos && <CashRegisterPage />}
+        {effectivePage === "expenses" && perms.isAdmin && <ExpensesPage />}
+        {effectivePage === "employees" && perms.isAdmin && <EmployeesPage />}
+        {/* Keyed on the active store id: SettingsPage seeds its form
+            fields once from `store.xxx` via useState initializers (the
+            simplest option, since every value is already synchronously
+            available on StoreRow) rather than an effect-driven reload —
+            the key forces a full remount on a multi-store switch so
+            those fields aren't left showing the previous store's data. */}
+        {effectivePage === "settings" && perms.isAdmin && active && <SettingsPage key={active.id} />}
         {effectivePage === "sync" && perms.isAdmin && <SyncQueuePage />}
         {effectivePage === "coming-soon" && <ComingSoonPage title={navOpts.comingSoonTitle ?? "قريبًا"} />}
       </Shell>

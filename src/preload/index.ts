@@ -7,6 +7,17 @@ import { contextBridge, ipcRenderer } from "electron";
 // where these untyped IPC results get their real TypeScript shape.
 const api = {
   printSilent: () => ipcRenderer.invoke("print:silent"),
+  /** Prints a fully self-contained receipt HTML document in an offscreen
+   * window — decoupled from whatever's on screen (see main/printing.ts). */
+  printReceipt: (html: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("print:receipt", html),
+  /** Prints a label HTML document `copies` times at its own physical
+   * size (widthMm × heightMm) — one call covers "print N copies of this
+   * label" via the native print `copies` option. */
+  printLabel: (
+    html: string,
+    opts: { widthMm: number; heightMm: number; copies: number },
+  ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("print:label", html, opts),
 
   db: {
     replaceStores: (rows: unknown[]) => ipcRenderer.invoke("db:replaceStores", rows),

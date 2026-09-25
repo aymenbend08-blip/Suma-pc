@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import {
   AlertTriangle,
+  Banknote,
   BarChart3,
   Bell,
   Boxes,
@@ -10,6 +11,7 @@ import {
   Minus,
   Package,
   Power,
+  Receipt,
   RefreshCw,
   RotateCcw,
   Search,
@@ -19,6 +21,7 @@ import {
   Truck,
   User,
   Users,
+  UserCog,
   Wallet,
   Wifi,
 } from "lucide-react";
@@ -26,7 +29,21 @@ import { useAuth } from "@/context/AuthContext";
 import { useStore, type StorePermissions } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 
-export type Page = "home" | "pos" | "products" | "stock" | "purchases" | "customers" | "dashboard" | "sync" | "coming-soon";
+export type Page =
+  | "home"
+  | "pos"
+  | "products"
+  | "stock"
+  | "purchases"
+  | "customers"
+  | "dashboard"
+  | "sales-history"
+  | "cash-register"
+  | "expenses"
+  | "employees"
+  | "settings"
+  | "sync"
+  | "coming-soon";
 
 export type NavOptions = { autoOpenReturn?: boolean; debtOnly?: boolean; comingSoonTitle?: string; openSuppliers?: boolean };
 export type Navigate = (page: Page, opts?: NavOptions) => void;
@@ -56,10 +73,12 @@ type SidebarSection = {
  * reference sections as distinct, real sidebar entries rather than
  * merging or dropping one.
  *
- * Sections with no Desktop feature behind them yet (Caisse, Paramètres)
- * route to the existing ComingSoonPage via the "coming-soon" page + a
- * title, same pattern HomePage's own placeholder tiles already used —
- * nothing new invented, just reachable from a second place now.
+ * Caisse and Paramètres used to route to ComingSoonPage — both are now
+ * real screens (CashRegisterPage / SettingsPage, Phase A items 5-6 & 9).
+ * Sales History, Expenses and Employees are new sections added in the
+ * same pass (Phase A items 4, 7, 8) — no reference-software slot for
+ * them, so they're appended after their closest existing relative
+ * (retours/caisse, then paramètres) rather than invented positions.
  */
 function buildSections(failedCount: number): SidebarSection[] {
   return [
@@ -115,12 +134,18 @@ function buildSections(failedCount: number): SidebarSection[] {
       page: "dashboard",
     },
     {
+      key: "sales-history",
+      label: "سجل المبيعات",
+      icon: Receipt,
+      visible: (p) => p.isAdmin,
+      page: "sales-history",
+    },
+    {
       key: "caisse",
       label: "الصندوق",
       icon: Wallet,
-      visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "الصندوق" },
+      visible: (p) => p.canUsePos,
+      page: "cash-register",
     },
     {
       key: "retours",
@@ -131,12 +156,25 @@ function buildSections(failedCount: number): SidebarSection[] {
       opts: { autoOpenReturn: true },
     },
     {
+      key: "expenses",
+      label: "المصاريف",
+      icon: Banknote,
+      visible: (p) => p.isAdmin,
+      page: "expenses",
+    },
+    {
+      key: "employees",
+      label: "الموظفون",
+      icon: UserCog,
+      visible: (p) => p.isAdmin,
+      page: "employees",
+    },
+    {
       key: "parametres",
       label: "الإعدادات",
       icon: Settings,
       visible: (p) => p.isAdmin,
-      page: "coming-soon",
-      opts: { comingSoonTitle: "الإعدادات" },
+      page: "settings",
     },
     {
       key: "sync",

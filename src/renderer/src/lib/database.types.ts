@@ -49,6 +49,15 @@ export type StoreMemberRow = {
   can_use_pos: boolean;
   can_refund: boolean;
   can_manage_customers: boolean;
+  /** Set by link_my_employee_accounts() when a signed-in user's phone
+   * matches this row but no admin has approved the link yet — see
+   * decide_employee_link_request(). Both null once linked (user_id set)
+   * or rejected. Optional (not `?: string | null` -> always present on a
+   * `select("*")` like EmployeesPage's own load(), but StoreContext's
+   * narrower permission-only select doesn't need it and omits it from
+   * its column list, so callers can't assume it's always populated). */
+  pending_link_user_id?: string | null;
+  pending_link_requested_at?: string | null;
 };
 
 export type ProductRow = {
@@ -136,6 +145,32 @@ export type CustomerPaymentRow = {
   amount: number;
   created_by: string | null;
   created_at: string;
+};
+
+/**
+ * Register (cash drawer) sessions — live on the shared Supabase project
+ * since SUMA Web's 20260918170000_register_sessions.sql migration.
+ * Written ONLY through the open_register()/close_register() SECURITY
+ * DEFINER RPCs (register_sessions has no INSERT/UPDATE policy of its own,
+ * only a member-read SELECT policy) — never insert/update this table
+ * directly from the client.
+ */
+export type RegisterSessionStatus = "open" | "closed";
+
+export type RegisterSessionRow = {
+  id: string;
+  store_id: string;
+  opened_by: string | null;
+  opened_by_name: string | null;
+  opening_balance: number;
+  status: RegisterSessionStatus;
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+  expected_cash: number | null;
+  counted_cash: number | null;
+  variance: number | null;
+  notes: string | null;
 };
 
 export type SaleRow = {
@@ -273,6 +308,7 @@ export type Database = {
       customers: TableDef<CustomerRow>;
       customer_payments: TableDef<CustomerPaymentRow>;
       expenses: TableDef<ExpenseRow>;
+      register_sessions: TableDef<RegisterSessionRow>;
       sales: TableDef<SaleRow>;
       sale_items: TableDef<SaleItemRow>;
       categories: TableDef<CategoryRow>;
@@ -335,6 +371,41 @@ export type Database = {
       cancel_purchase_order: {
         Args: { _po_id: string; _store_id: string };
         Returns: PurchaseOrderRow;
+      };
+      open_register: {
+        Args: { _store_id: string; _opening_balance?: number; _notes?: string };
+        Returns: RegisterSessionRow;
+      };
+      close_register: {
+        Args: { _session_id: string; _store_id: string; _counted_cash: number; _notes?: string };
+        Returns: RegisterSessionRow;
+      };
+      add_item_to_sale: {
+        Args: { _sale_id: string; _store_id: string; _product_id: string; _quantity: number };
+        Returns: SaleRow;
+      };
+      /** Requests (does NOT itself grant) a link between the signed-in
+       * user and any store_members row added by phone (user_id still
+       * null) matching their own profile phone — see EmployeesPage's
+       * "add by phone" flow and AuthContext's call to it after sign-in.
+       * Stamps pending_link_user_id/pending_link_requested_at only; an
+       * admin must still call decide_employee_link_request() to approve
+       * it. No args, returns the number of rows stamped pending. */
+      link_my_employee_accounts: { Args: Record<string, never>; Returns: number };
+      list_pending_employee_link_requests: {
+        Args: { _store_id: string };
+        Returns: Array<{
+          store_member_id: string;
+          member_full_name: string | null;
+          member_phone: string | null;
+          requested_at: string;
+          requester_full_name: string | null;
+          requester_email: string | null;
+        }>;
+      };
+      decide_employee_link_request: {
+        Args: { _store_member_id: string; _approve: boolean };
+        Returns: StoreMemberRow;
       };
     };
     Enums: Record<string, never>;
