@@ -27,6 +27,8 @@ const api = {
       ipcRenderer.invoke("db:replaceProducts", storeId, rows),
     replaceProductBarcodes: (storeId: string, rows: unknown[]) =>
       ipcRenderer.invoke("db:replaceProductBarcodes", storeId, rows),
+    replaceProductVariants: (storeId: string, rows: unknown[]) =>
+      ipcRenderer.invoke("db:replaceProductVariants", storeId, rows),
     replaceCategories: (storeId: string, rows: unknown[]) =>
       ipcRenderer.invoke("db:replaceCategories", storeId, rows),
     replaceCustomers: (storeId: string, rows: unknown[]) =>

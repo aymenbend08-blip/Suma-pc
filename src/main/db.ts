@@ -51,6 +51,19 @@ export function initDb(userDataPath: string): void {
     );
     CREATE INDEX IF NOT EXISTS idx_product_barcodes_lookup ON product_barcodes(store_id, barcode);
 
+    -- Variants are named, barcoded presentations of a base product (SUMA's
+    -- documented model: price and stock stay on the base product). Only
+    -- what POS needs to resolve a scanned variant barcode offline is
+    -- mirrored — attributes kept as its JSON text. CREATE IF NOT EXISTS so
+    -- an existing install picks the table up on its next launch; no ALTER
+    -- of any existing table is involved.
+    CREATE TABLE IF NOT EXISTS product_variants (
+      id TEXT PRIMARY KEY, product_id TEXT, store_id TEXT, variant_name TEXT,
+      barcode TEXT, is_active INTEGER, attributes TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_variants_lookup ON product_variants(store_id, barcode);
+    CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants(product_id);
+
     CREATE TABLE IF NOT EXISTS categories (
       id TEXT PRIMARY KEY, store_id TEXT, name TEXT, sort_order INTEGER,
       created_at TEXT, is_active INTEGER
@@ -206,6 +219,30 @@ export function replaceProductBarcodes(storeId: string, rows: Record<string, unk
   tx(rows);
 }
 
+export function replaceProductVariants(storeId: string, rows: Record<string, unknown>[]): void {
+  const d = getDb();
+  const del = d.prepare("DELETE FROM product_variants WHERE store_id = ?");
+  const insert = d.prepare(`
+    INSERT INTO product_variants (id, product_id, store_id, variant_name, barcode, is_active, attributes)
+    VALUES (@id, @product_id, @store_id, @variant_name, @barcode, @is_active, @attributes)
+  `);
+  const tx = d.transaction((items: Record<string, unknown>[]) => {
+    del.run(storeId);
+    for (const r of items) {
+      insert.run({
+        id: r["id"],
+        product_id: r["product_id"],
+        store_id: r["store_id"],
+        variant_name: r["variant_name"],
+        barcode: r["barcode"] ?? null,
+        is_active: bool(r["is_active"]),
+        attributes: r["attributes"] == null ? null : JSON.stringify(r["attributes"]),
+      });
+    }
+  });
+  tx(rows);
+}
+
 export function replaceCategories(storeId: string, rows: Record<string, unknown>[]): void {
   const d = getDb();
   const del = d.prepare("DELETE FROM categories WHERE store_id = ?");
@@ -241,27 +278,68 @@ export function replaceCustomers(storeId: string, rows: Record<string, unknown>[
 export function searchProducts(storeId: string, term: string, limit = 20): unknown[] {
   const d = getDb();
   const like = `%${term.replace(/[%_]/g, "")}%`;
+  // Extra barcodes (product_barcodes) and ACTIVE variant barcodes also
+  // match, resolved to their base product — a cashier typing part of an
+  // alias code finds the product the same way the scanner would.
   return d
     .prepare(
       `SELECT * FROM products
        WHERE store_id = ? AND is_active = 1
-         AND (name LIKE ? OR barcode LIKE ? OR internal_code LIKE ?)
+         AND (name LIKE ? OR barcode LIKE ? OR internal_code LIKE ?
+           OR id IN (SELECT product_id FROM product_barcodes WHERE store_id = ? AND barcode LIKE ?)
+           OR id IN (SELECT product_id FROM product_variants
+                     WHERE store_id = ? AND is_active = 1 AND barcode LIKE ?))
        ORDER BY name LIMIT ?`,
     )
-    .all(storeId, like, like, like, limit);
+    .all(storeId, like, like, like, storeId, like, storeId, like, limit);
 }
 
-export function findProductByBarcode(storeId: string, barcode: string): unknown {
+export type BarcodeMatch = {
+  [column: string]: unknown;
+  /** Set only when the code matched an active variant (step 3). */
+  matched_variant_id: string | null;
+  matched_variant_name: string | null;
+};
+
+/**
+ * Same resolution order as SUMA Web's unified lookup: 1) the product's
+ * own barcode, 2) an extra barcode (product_barcodes) -> its product,
+ * 3) an ACTIVE variant's barcode -> its base product, reporting which
+ * variant matched (an inactive variant never resolves). The database
+ * guarantees a code lives in only one of the three tables per store, so
+ * the order only matters for a stale mirror mid-hydrate.
+ */
+export function findProductByBarcode(storeId: string, barcode: string): BarcodeMatch | null {
   const d = getDb();
+  const code = barcode.trim();
+  if (!code) return null;
   const direct = d
     .prepare("SELECT * FROM products WHERE store_id = ? AND barcode = ? LIMIT 1")
-    .get(storeId, barcode);
-  if (direct) return direct;
+    .get(storeId, code) as Record<string, unknown> | undefined;
+  if (direct) return { ...direct, matched_variant_id: null, matched_variant_name: null };
+
   const alias = d
     .prepare("SELECT product_id FROM product_barcodes WHERE store_id = ? AND barcode = ? LIMIT 1")
-    .get(storeId, barcode) as { product_id: string } | undefined;
-  if (!alias) return null;
-  return d.prepare("SELECT * FROM products WHERE id = ?").get(alias.product_id) ?? null;
+    .get(storeId, code) as { product_id: string } | undefined;
+  if (alias) {
+    const product = d.prepare("SELECT * FROM products WHERE id = ?").get(alias.product_id) as
+      | Record<string, unknown>
+      | undefined;
+    if (product) return { ...product, matched_variant_id: null, matched_variant_name: null };
+  }
+
+  const variant = d
+    .prepare(
+      "SELECT id, product_id, variant_name FROM product_variants WHERE store_id = ? AND barcode = ? AND is_active = 1 LIMIT 1",
+    )
+    .get(storeId, code) as { id: string; product_id: string; variant_name: string } | undefined;
+  if (variant) {
+    const product = d.prepare("SELECT * FROM products WHERE id = ?").get(variant.product_id) as
+      | Record<string, unknown>
+      | undefined;
+    if (product) return { ...product, matched_variant_id: variant.id, matched_variant_name: variant.variant_name };
+  }
+  return null;
 }
 
 export function searchCustomers(storeId: string, term: string, limit = 20): unknown[] {
@@ -298,7 +376,9 @@ export type LocalSaleInput = {
   storeId: string;
   cashierId: string;
   cashierName: string | null;
-  items: Array<{ productId: string; quantity: number }>;
+  /** variantId: optional, purely a trace of which variant was scanned —
+   * the price and stock stay the base product's (see record_sale). */
+  items: Array<{ productId: string; quantity: number; variantId?: string | null }>;
   discount: number;
   paymentMethod: "cash" | "card" | "credit";
   customerId: string | null;
@@ -315,6 +395,7 @@ export type LocalSaleInput = {
 export function createLocalSale(input: LocalSaleInput): { id: string; total_amount: number } {
   const d = getDb();
   const getProduct = d.prepare("SELECT * FROM products WHERE id = ?");
+  const getVariant = d.prepare("SELECT id, variant_name FROM product_variants WHERE id = ? AND product_id = ?");
   const updateStock = d.prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?");
   const addCredit = d.prepare("UPDATE customers SET credit_balance = credit_balance + ? WHERE id = ?");
   const insertSale = d.prepare(`
@@ -327,7 +408,8 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
   const insertItem = d.prepare(`
     INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, unit_price, line_total,
       variant_id, variant_name, refunded_quantity)
-    VALUES (@id, @sale_id, @product_id, @product_name, @quantity, @unit_price, @line_total, NULL, NULL, 0)
+    VALUES (@id, @sale_id, @product_id, @product_name, @quantity, @unit_price, @line_total, @variant_id,
+      @variant_name, 0)
   `);
   const enqueue = d.prepare(`
     INSERT INTO sync_queue (id, operation_type, payload, status, created_at, retry_count)
@@ -345,13 +427,26 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
       quantity: number;
       unit_price: number;
       line_total: number;
+      variant_id: string | null;
+      variant_name: string | null;
     }> = [];
 
     for (const item of input.items) {
       const product = getProduct.get(item.productId) as
-        | { id: string; name: string; selling_price: number; stock_quantity: number }
+        | { id: string; name: string; selling_price: number | null; stock_quantity: number }
         | undefined;
       if (!product) throw new Error(`منتج غير معروف محليًا: ${item.productId}`);
+      if (product.selling_price === null || product.selling_price === undefined) {
+        throw new Error(`المنتج «${product.name}» بدون سعر بيع — حدّد سعره أولاً.`);
+      }
+      // A variant id is only a trace: kept when the local mirror knows it
+      // belongs to this product (its name goes on the local line), and
+      // forwarded to record_sale either way — the server re-validates it
+      // and ignores one that no longer exists, so the sale still syncs.
+      const variantId = item.variantId ?? null;
+      const variant = variantId
+        ? (getVariant.get(variantId, product.id) as { id: string; variant_name: string } | undefined)
+        : undefined;
       // Overselling is allowed on purpose (matches record_sale()'s
       // 20260919200000 migration) — stock_quantity is left to go
       // negative below, never rejected or floored.
@@ -366,6 +461,8 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
         quantity: item.quantity,
         unit_price: Number(product.selling_price),
         line_total: lineTotal,
+        variant_id: variantId,
+        variant_name: variant?.variant_name ?? null,
       });
       updateStock.run(item.quantity, item.productId);
     }
@@ -415,7 +512,12 @@ export function createLocalSale(input: LocalSaleInput): { id: string; total_amou
       cryptoRandomId(),
       JSON.stringify({
         _store_id: input.storeId,
-        _items: lineRows.map((r) => ({ product_id: r.product_id, quantity: r.quantity, unit_price: r.unit_price })),
+        _items: lineRows.map((r) => ({
+          product_id: r.product_id,
+          ...(r.variant_id ? { variant_id: r.variant_id } : {}),
+          quantity: r.quantity,
+          unit_price: r.unit_price,
+        })),
         _discount: input.discount,
         _payment_method: input.paymentMethod,
         ...(input.customerId ? { _customer_id: input.customerId } : {}),

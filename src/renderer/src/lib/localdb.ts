@@ -3,6 +3,7 @@ import type {
   CustomerRow,
   ProductBarcodeRow,
   ProductRow,
+  ProductVariantRow,
   StoreMemberRow,
   StoreRow,
 } from "./database.types";
@@ -21,13 +22,17 @@ export const localDb = {
   replaceProducts: (storeId: string, rows: ProductRow[]) => window.suma.db.replaceProducts(storeId, rows),
   replaceProductBarcodes: (storeId: string, rows: ProductBarcodeRow[]) =>
     window.suma.db.replaceProductBarcodes(storeId, rows),
+  replaceProductVariants: (storeId: string, rows: ProductVariantRow[]) =>
+    window.suma.db.replaceProductVariants(storeId, rows),
   replaceCategories: (storeId: string, rows: CategoryRow[]) => window.suma.db.replaceCategories(storeId, rows),
   replaceCustomers: (storeId: string, rows: CustomerRow[]) => window.suma.db.replaceCustomers(storeId, rows),
 
   searchProducts: async (storeId: string, term: string): Promise<ProductRow[]> =>
     (await window.suma.db.searchProducts(storeId, term)) as ProductRow[],
-  findProductByBarcode: async (storeId: string, barcode: string): Promise<ProductRow | null> =>
-    ((await window.suma.db.findProductByBarcode(storeId, barcode)) as ProductRow | null) ?? null,
+  /** 3-step resolution (main barcode -> extra barcode -> active variant
+   * barcode); `matched_variant_*` is set only for a variant hit. */
+  findProductByBarcode: async (storeId: string, barcode: string): Promise<BarcodeLookupResult | null> =>
+    ((await window.suma.db.findProductByBarcode(storeId, barcode)) as BarcodeLookupResult | null) ?? null,
   searchCustomers: async (storeId: string, term: string): Promise<CustomerRow[]> =>
     (await window.suma.db.searchCustomers(storeId, term)) as CustomerRow[],
   listCustomers: async (storeId: string): Promise<CustomerRow[]> =>
@@ -56,12 +61,17 @@ export const localDb = {
   dismissFailedSync: (id: string) => window.suma.db.dismissFailedSync(id),
 };
 
+export type BarcodeLookupResult = ProductRow & {
+  matched_variant_id: string | null;
+  matched_variant_name: string | null;
+};
+
 export type LocalSaleInput = {
   id: string;
   storeId: string;
   cashierId: string;
   cashierName: string | null;
-  items: Array<{ productId: string; quantity: number }>;
+  items: Array<{ productId: string; quantity: number; variantId?: string | null }>;
   discount: number;
   paymentMethod: "cash" | "card" | "credit";
   customerId: string | null;

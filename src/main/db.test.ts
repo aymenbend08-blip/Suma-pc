@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import * as db from "./db";
 
 // Exercises the real db.ts against a real (temp, on-disk) SQLite file —
@@ -86,7 +87,7 @@ describe("createLocalSale", () => {
     });
 
     expect(result.total_amount).toBe(200);
-    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    const product = db.findProductByBarcode("store-1", "1234567890") as unknown as { stock_quantity: number };
     expect(product.stock_quantity).toBe(3);
 
     const pending = db.listPendingSync();
@@ -112,7 +113,7 @@ describe("createLocalSale", () => {
     });
 
     expect(result.total_amount).toBe(500); // full quantity charged, not clamped
-    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    const product = db.findProductByBarcode("store-1", "1234567890") as unknown as { stock_quantity: number };
     expect(product.stock_quantity).toBe(-3); // real deficit, not floored at 0
     expect(db.listPendingSync()).toHaveLength(1);
   });
@@ -142,7 +143,7 @@ describe("createLocalSale", () => {
       clientRequestId: "req-3b",
     });
 
-    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    const product = db.findProductByBarcode("store-1", "1234567890") as unknown as { stock_quantity: number };
     expect(product.stock_quantity).toBe(-7); // 2 - 5 - 4
   });
 
@@ -243,7 +244,7 @@ describe("createLocalSale", () => {
     const customers = db.listCustomers("store-1") as { credit_balance: number }[];
     expect(customers[0].credit_balance).toBe(1500); // 1000 + 500, delta-based
 
-    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    const product = db.findProductByBarcode("store-1", "1234567890") as unknown as { stock_quantity: number };
     expect(product.stock_quantity).toBe(8); // stock still decremented as usual
 
     const pending = db.listPendingSync();
@@ -308,7 +309,7 @@ describe("createLocalSale", () => {
 
     const customers = db.listCustomers("store-1") as { credit_balance: number }[];
     expect(customers[0].credit_balance).toBe(1000); // untouched — the whole transaction rolled back
-    const product = db.findProductByBarcode("store-1", "1234567890") as { stock_quantity: number };
+    const product = db.findProductByBarcode("store-1", "1234567890") as unknown as { stock_quantity: number };
     expect(product.stock_quantity).toBe(10); // stock decrement for prod-1 rolled back too
     expect(db.listPendingSync()).toHaveLength(0); // nothing enqueued either
   });
@@ -392,5 +393,236 @@ describe("sync_queue lifecycle", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].last_error).toBe("TypeError: Failed to fetch");
     expect(pending[0].retry_count).toBe(1);
+  });
+});
+
+function seedVariant(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "var-1",
+    product_id: "prod-1",
+    store_id: "store-1",
+    variant_name: "أحمر",
+    barcode: "VAR-RED-1",
+    selling_price: null,
+    stock_quantity: null,
+    image_url: null,
+    attributes: { اللون: "أحمر" },
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+describe("product_variants mirror", () => {
+  it("replaceProductVariants fully replaces the store's variants and leaves other stores alone", () => {
+    seedProduct();
+    db.replaceProductVariants("store-1", [seedVariant(), seedVariant({ id: "var-2", barcode: "VAR-BLUE-1", variant_name: "أزرق" })]);
+    db.replaceProductVariants("store-2", [seedVariant({ id: "var-other", store_id: "store-2", barcode: "OTHER-1" })]);
+
+    expect((db.findProductByBarcode("store-1", "VAR-BLUE-1") as db.BarcodeMatch).matched_variant_id).toBe("var-2");
+
+    // Second hydrate for store-1 drops var-2 — it must stop resolving.
+    db.replaceProductVariants("store-1", [seedVariant()]);
+    expect(db.findProductByBarcode("store-1", "VAR-BLUE-1")).toBeNull();
+    expect(db.findProductByBarcode("store-1", "VAR-RED-1")?.matched_variant_id).toBe("var-1");
+    // store-2's variant was never touched by store-1's replace (its product
+    // simply isn't mirrored here, so it resolves to nothing — but the row
+    // survives, proven by re-seeding the product for store-2).
+    db.replaceProducts("store-2", [seedProductRow({ id: "prod-1b", store_id: "store-2", barcode: "P2" })]);
+    db.replaceProductVariants("store-2", [seedVariant({ id: "var-other", store_id: "store-2", product_id: "prod-1b", barcode: "OTHER-1" })]);
+    expect(db.findProductByBarcode("store-2", "OTHER-1")?.id).toBe("prod-1b");
+  });
+
+  it("initDb is idempotent on an existing database file (upgrade path adds the table without touching data)", () => {
+    seedProduct();
+    db.initDb(tempDir); // simulate the next app launch on the same file
+    expect(db.findProductByBarcode("store-1", "1234567890")?.id).toBe("prod-1");
+    db.replaceProductVariants("store-1", [seedVariant()]);
+    expect(db.findProductByBarcode("store-1", "VAR-RED-1")?.id).toBe("prod-1");
+  });
+});
+
+describe("findProductByBarcode — 3-step resolution", () => {
+  beforeEach(() => {
+    db.replaceProducts("store-1", [
+      seedProductRow({ id: "prod-main", barcode: "111111" }),
+      seedProductRow({ id: "prod-alias", barcode: "222222", name: "منتج باركود إضافي" }),
+      seedProductRow({ id: "prod-var", barcode: "333333", name: "منتج بتنويعات" }),
+    ]);
+    db.replaceProductBarcodes("store-1", [
+      { id: "bc-1", product_id: "prod-alias", store_id: "store-1", barcode: "ALIAS-1", note: null, created_at: "" },
+    ]);
+    db.replaceProductVariants("store-1", [
+      seedVariant({ id: "var-a", product_id: "prod-var", barcode: "VAR-A", variant_name: "كبير" }),
+      seedVariant({ id: "var-off", product_id: "prod-var", barcode: "VAR-OFF", variant_name: "قديم", is_active: false }),
+    ]);
+  });
+
+  it("1) main barcode resolves to the product with no variant", () => {
+    const hit = db.findProductByBarcode("store-1", "111111");
+    expect(hit?.id).toBe("prod-main");
+    expect(hit?.matched_variant_id).toBeNull();
+    expect(hit?.matched_variant_name).toBeNull();
+  });
+
+  it("2) extra barcode resolves to its parent product", () => {
+    const hit = db.findProductByBarcode("store-1", "ALIAS-1");
+    expect(hit?.id).toBe("prod-alias");
+    expect(hit?.matched_variant_id).toBeNull();
+  });
+
+  it("3) active variant barcode resolves to the BASE product and reports the variant", () => {
+    const hit = db.findProductByBarcode("store-1", "VAR-A");
+    expect(hit?.id).toBe("prod-var");
+    expect(hit?.selling_price).toBe(100); // base product's price
+    expect(hit?.matched_variant_id).toBe("var-a");
+    expect(hit?.matched_variant_name).toBe("كبير");
+  });
+
+  it("ignores an inactive variant", () => {
+    expect(db.findProductByBarcode("store-1", "VAR-OFF")).toBeNull();
+  });
+
+  it("prefers the main barcode over an (inconsistent, stale) alias or variant with the same code", () => {
+    db.replaceProductBarcodes("store-1", [
+      { id: "bc-dup", product_id: "prod-alias", store_id: "store-1", barcode: "111111", note: null, created_at: "" },
+    ]);
+    db.replaceProductVariants("store-1", [seedVariant({ id: "var-dup", product_id: "prod-var", barcode: "111111" })]);
+    expect(db.findProductByBarcode("store-1", "111111")?.id).toBe("prod-main");
+
+    db.replaceProducts("store-1", [
+      seedProductRow({ id: "prod-alias", barcode: "222222" }),
+      seedProductRow({ id: "prod-var", barcode: "333333" }),
+    ]);
+    // With no main-barcode owner left, the alias wins over the variant.
+    expect(db.findProductByBarcode("store-1", "111111")?.id).toBe("prod-alias");
+  });
+
+  it("returns null for an unknown or blank code, and trims the scanned value", () => {
+    expect(db.findProductByBarcode("store-1", "NOPE")).toBeNull();
+    expect(db.findProductByBarcode("store-1", "   ")).toBeNull();
+    expect(db.findProductByBarcode("store-1", " VAR-A ")?.matched_variant_id).toBe("var-a");
+  });
+});
+
+describe("searchProducts", () => {
+  beforeEach(() => {
+    db.replaceProducts("store-1", [
+      seedProductRow({ id: "p-a", name: "حليب", barcode: "5000" }),
+      seedProductRow({ id: "p-b", name: "قهوة", barcode: "6000" }),
+      seedProductRow({ id: "p-c", name: "شاي", barcode: "7000" }),
+    ]);
+    db.replaceProductBarcodes("store-1", [
+      { id: "bc-1", product_id: "p-b", store_id: "store-1", barcode: "EXTRA-998877", note: null, created_at: "" },
+    ]);
+    db.replaceProductVariants("store-1", [
+      seedVariant({ id: "v-1", product_id: "p-c", barcode: "VARIANT-445566" }),
+      seedVariant({ id: "v-2", product_id: "p-a", barcode: "OFFVAR-112233", is_active: false }),
+    ]);
+  });
+
+  it("matches a product through a partial extra barcode", () => {
+    const rows = db.searchProducts("store-1", "998877") as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(["p-b"]);
+  });
+
+  it("matches a product through a partial active variant barcode", () => {
+    const rows = db.searchProducts("store-1", "445566") as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(["p-c"]);
+  });
+
+  it("does not match through an inactive variant's barcode", () => {
+    expect(db.searchProducts("store-1", "112233")).toHaveLength(0);
+  });
+
+  it("still matches by name and returns each product once", () => {
+    const rows = db.searchProducts("store-1", "قهوة") as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(["p-b"]);
+  });
+});
+
+describe("createLocalSale — variants", () => {
+  it("passes variant_id into the queued record_sale payload and stores the variant on the local line, at the base price/stock", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 300 });
+    db.replaceProductVariants("store-1", [seedVariant()]);
+
+    db.createLocalSale({
+      id: "sale-var-1",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [
+        { productId: "prod-1", quantity: 2, variantId: "var-1" },
+        { productId: "prod-1", quantity: 1 },
+      ],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-var-1",
+    });
+
+    const payload = JSON.parse(db.listPendingSync()[0].payload) as {
+      _items: Array<Record<string, unknown>>;
+      _occurred_at: string;
+      _client_request_id: string;
+    };
+    expect(payload._items).toEqual([
+      { product_id: "prod-1", variant_id: "var-1", quantity: 2, unit_price: 300 },
+      { product_id: "prod-1", quantity: 1, unit_price: 300 },
+    ]);
+    expect(typeof payload._occurred_at).toBe("string");
+    expect(payload._client_request_id).toBe("req-var-1");
+
+    // Base stock took both lines (variants share the parent's stock).
+    expect(db.findProductByBarcode("store-1", "1234567890")?.stock_quantity).toBe(7);
+
+    // Local sale_items carry the variant trace (read through a second
+    // connection on the same file — db.ts exposes no sale_items reader).
+    const raw = new Database(join(tempDir, "suma-desktop.db"), { readonly: true });
+    const lines = raw
+      .prepare("SELECT variant_id, variant_name, unit_price FROM sale_items WHERE sale_id = ? ORDER BY quantity DESC")
+      .all("sale-var-1");
+    raw.close();
+    expect(lines).toEqual([
+      { variant_id: "var-1", variant_name: "أحمر", unit_price: 300 },
+      { variant_id: null, variant_name: null, unit_price: 300 },
+    ]);
+  });
+
+  it("still forwards an unknown variant id (the server ignores it) without failing the sale", () => {
+    seedProduct({ stock_quantity: 10, selling_price: 300 });
+    const res = db.createLocalSale({
+      id: "sale-var-2",
+      storeId: "store-1",
+      cashierId: "cashier-1",
+      cashierName: null,
+      items: [{ productId: "prod-1", quantity: 1, variantId: "gone-variant" }],
+      discount: 0,
+      paymentMethod: "cash",
+      customerId: null,
+      clientRequestId: "req-var-2",
+    });
+    expect(res.total_amount).toBe(300);
+    const payload = JSON.parse(db.listPendingSync()[0].payload) as { _items: Array<Record<string, unknown>> };
+    expect(payload._items[0].variant_id).toBe("gone-variant");
+  });
+
+  it("refuses a product that has no selling price, writing nothing", () => {
+    seedProduct({ selling_price: null });
+    expect(() =>
+      db.createLocalSale({
+        id: "sale-noprice",
+        storeId: "store-1",
+        cashierId: "cashier-1",
+        cashierName: null,
+        items: [{ productId: "prod-1", quantity: 1 }],
+        discount: 0,
+        paymentMethod: "cash",
+        customerId: null,
+        clientRequestId: "req-noprice",
+      }),
+    ).toThrow(/بدون سعر بيع/);
+    expect(db.listPendingSync()).toHaveLength(0);
   });
 });

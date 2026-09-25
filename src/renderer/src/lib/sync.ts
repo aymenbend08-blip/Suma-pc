@@ -9,6 +9,7 @@ import {
   type AdjustStockArgs,
 } from "./rpc";
 import { isNetworkError } from "./net";
+import type { CategoryRow, CustomerRow, ProductBarcodeRow, ProductRow, ProductVariantRow } from "./database.types";
 
 /**
  * Full reference-table pull for one store — no incremental "since X"
@@ -19,17 +20,47 @@ import { isNetworkError } from "./net";
  * actually online" probe — a network-shaped failure here is what flips
  * the UI's connectivity indicator to offline.
  */
+const HYDRATE_PAGE = 1000;
+
+/**
+ * Every row of one store-scoped table, fetched in 1000-row pages ordered by
+ * id. PostgREST caps an un-ranged select at its max_rows (1000 on Supabase
+ * by default) without any error, so a single select("*") silently
+ * truncated the mirror for a store past 1000 products — which the Excel
+ * importer makes an everyday size, and POS reads ONLY from this mirror.
+ */
+async function fetchAllForStore<T>(
+  table: "products" | "product_barcodes" | "product_variants" | "categories" | "customers",
+  storeId: string,
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const all: T[] = [];
+  for (let from = 0; ; from += HYDRATE_PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .eq("store_id", storeId)
+      .order("id", { ascending: true })
+      .range(from, from + HYDRATE_PAGE - 1);
+    if (error) return { data: [], error };
+    const page = (data ?? []) as T[];
+    all.push(...page);
+    if (page.length < HYDRATE_PAGE) break;
+  }
+  return { data: all, error: null };
+}
+
 export async function hydrate(storeId: string, userId: string): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const [storesRes, membersRes, productsRes, barcodesRes, categoriesRes, customersRes] = await Promise.all([
+    const [storesRes, membersRes, productsRes, barcodesRes, variantsRes, categoriesRes, customersRes] = await Promise.all([
       supabase.from("stores").select("*").order("created_at", { ascending: true }),
       supabase.from("store_members").select("*").eq("user_id", userId),
-      supabase.from("products").select("*").eq("store_id", storeId),
-      supabase.from("product_barcodes").select("*").eq("store_id", storeId),
-      supabase.from("categories").select("*").eq("store_id", storeId),
-      supabase.from("customers").select("*").eq("store_id", storeId),
+      fetchAllForStore<ProductRow>("products", storeId),
+      fetchAllForStore<ProductBarcodeRow>("product_barcodes", storeId),
+      fetchAllForStore<ProductVariantRow>("product_variants", storeId),
+      fetchAllForStore<CategoryRow>("categories", storeId),
+      fetchAllForStore<CustomerRow>("customers", storeId),
     ]);
-    for (const res of [storesRes, membersRes, productsRes, barcodesRes, categoriesRes, customersRes]) {
+    for (const res of [storesRes, membersRes, productsRes, barcodesRes, variantsRes, categoriesRes, customersRes]) {
       if (res.error) throw new Error(res.error.message);
     }
 
@@ -37,6 +68,7 @@ export async function hydrate(storeId: string, userId: string): Promise<{ ok: tr
     localDb.replaceStoreMembers(userId, membersRes.data ?? []);
     localDb.replaceProducts(storeId, productsRes.data ?? []);
     localDb.replaceProductBarcodes(storeId, barcodesRes.data ?? []);
+    localDb.replaceProductVariants(storeId, variantsRes.data ?? []);
     localDb.replaceCategories(storeId, categoriesRes.data ?? []);
     localDb.replaceCustomers(storeId, customersRes.data ?? []);
 

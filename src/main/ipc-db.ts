@@ -17,6 +17,9 @@ export function registerDbIpc(): void {
   ipcMain.handle("db:replaceProductBarcodes", (_e, storeId: string, rows: Record<string, unknown>[]) =>
     db.replaceProductBarcodes(storeId, rows),
   );
+  ipcMain.handle("db:replaceProductVariants", (_e, storeId: string, rows: Record<string, unknown>[]) =>
+    db.replaceProductVariants(storeId, rows),
+  );
   ipcMain.handle("db:replaceCategories", (_e, storeId: string, rows: Record<string, unknown>[]) =>
     db.replaceCategories(storeId, rows),
   );
