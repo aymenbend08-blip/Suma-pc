@@ -62,7 +62,6 @@ function AuthedApp() {
 
   const effectivePage: Page =
     (page === "pos" && !perms.canUsePos) ||
-    (page === "products" && !perms.canManageProducts) ||
     (page === "stock" && !perms.canManageProducts) ||
     (page === "purchases" && !perms.canManageProducts) ||
     (page === "customers" && !perms.canManageCustomers) ||
@@ -81,7 +80,10 @@ function AuthedApp() {
       <Shell page={effectivePage} navOpts={navOpts} onNavigate={navigate}>
         {effectivePage === "home" && <HomePage onNavigate={navigate} />}
         {effectivePage === "pos" && perms.canUsePos && <POSPage autoOpenReturn={navOpts.autoOpenReturn} />}
-        {effectivePage === "products" && perms.canManageProducts && <ProductsPage />}
+        {/* Every member may browse the catalog (SUMA Web shows المنتجات to all
+            members, read-only without can_manage_products); writes inside
+            are gated per action and by RLS. */}
+        {effectivePage === "products" && <ProductsPage />}
         {effectivePage === "stock" && perms.canManageProducts && <StockPage />}
         {effectivePage === "purchases" && perms.canManageProducts && <PurchasesPage openSuppliers={navOpts.openSuppliers} />}
         {effectivePage === "customers" && perms.canManageCustomers && (

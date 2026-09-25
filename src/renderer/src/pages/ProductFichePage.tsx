@@ -484,7 +484,7 @@ export function ProductFichePage({
         onMouseDown={startDrag}
         title="اسحب لتحريك النافذة"
       >
-        <h1 className="text-lg font-bold">{product ? "تعديل منتج" : "إضافة منتج"}</h1>
+        <h1 className="text-lg font-bold">{!product ? "إضافة منتج" : canWrite ? "تعديل منتج" : "بطاقة المنتج"}</h1>
         <Button variant="ghost" size="icon" className="ms-auto" onClick={onClose} aria-label="إغلاق">
           <X className="size-5" aria-hidden />
         </Button>
@@ -492,6 +492,10 @@ export function ProductFichePage({
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="grid gap-4 lg:grid-cols-2">
+          {/* Read-only for members without write access: the fields are shown
+              (SUMA Web's product page is readable by every member) but can't
+              be edited. `contents` keeps the sections in the grid. */}
+          <fieldset disabled={!canWrite} className="contents">
           {/* الأساسية */}
           <section className="surface overflow-hidden p-0">
             <h2 className="bg-[var(--primary)] px-4 py-2 text-sm font-bold text-[var(--primary-foreground)]">المعلومات الأساسية</h2>
@@ -514,6 +518,12 @@ export function ProductFichePage({
                   <Button type="button" variant="outline" size="sm" disabled={uploadingImage} onClick={() => imageInputRef.current?.click()}>
                     {uploadingImage ? "جاري الرفع..." : imageUrl ? "بدّل الصورة" : "ارفع صورة"}
                   </Button>
+                  {imageUrl && !uploadingImage && (
+                    // Same as SUMA Web's "احذف الصورة": clears image_url on save.
+                    <button type="button" className="text-start text-xs text-destructive disabled:opacity-50" onClick={() => setImageUrl(null)}>
+                      احذف الصورة
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -690,6 +700,8 @@ export function ProductFichePage({
             </div>
           </section>
 
+          </fieldset>
+
           {/* الباركود */}
           <ExtraBarcodesSection
             storeId={storeId}
@@ -822,7 +834,7 @@ export function ProductFichePage({
                 </button>
               ))}
             </div>
-            <div className="p-4">
+            <fieldset disabled={!canWrite} className="p-4">
               {activeTab === "packaging" && (
                 <textarea
                   value={packaging}
@@ -860,7 +872,7 @@ export function ProductFichePage({
                   <p className="mt-1 text-xs text-muted-foreground">اختياري — لمنتجات كالألبان والخبز.</p>
                 </div>
               )}
-            </div>
+            </fieldset>
           </section>
         </div>
       </div>

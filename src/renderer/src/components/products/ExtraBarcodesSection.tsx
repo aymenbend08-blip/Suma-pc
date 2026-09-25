@@ -2,7 +2,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Check, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { findBarcodeConflict, mapProductError, validateBarcode } from "@/lib/productBarcodes";
+import { findBarcodeConflict, mapProductError, NOTHING_DELETED_MESSAGE, validateBarcode } from "@/lib/productBarcodes";
 import type { ProductBarcodeRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -112,9 +112,16 @@ export function ExtraBarcodesSection({
   async function confirmRemove() {
     if (!removeTarget) return;
     setRemoving(true);
-    const { error } = await supabase.from("product_barcodes").delete().eq("id", removeTarget.id).eq("store_id", storeId);
+    const { data: deleted, error } = await supabase
+      .from("product_barcodes")
+      .delete()
+      .eq("id", removeTarget.id)
+      .eq("store_id", storeId)
+      .select("id");
     setRemoving(false);
     if (error) return toast.error(mapProductError(error));
+    // RLS reports an unauthorized DELETE as "0 rows", not as an error.
+    if (!deleted || deleted.length === 0) return toast.error(NOTHING_DELETED_MESSAGE);
     onRowsChange(rows.filter((r) => r.id !== removeTarget.id));
     setRemoveTarget(null);
     toast.success("تم حذف الباركود الإضافي.");

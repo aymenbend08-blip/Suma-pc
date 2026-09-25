@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, CloudOff, FileDown, FileUp, FolderPlus, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, CloudOff, Eye, FileDown, FileUp, FolderPlus, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
 import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
-import { findProductIdsByAltBarcode, mapProductError, sanitizeSearchTerm } from "@/lib/productBarcodes";
+import { findProductIdsByAltBarcode, mapProductError, NOTHING_CHANGED_MESSAGE, NOTHING_DELETED_MESSAGE, sanitizeSearchTerm } from "@/lib/productBarcodes";
 import { EXPORT_HEADERS, buildExportRow, chunk } from "@/lib/productImport";
 import type { CategoryRow, ProductRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
@@ -220,9 +220,16 @@ export function ProductsPage() {
   async function confirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
-    const { error } = await supabase.from("products").delete().eq("id", deleteTarget.id).eq("store_id", storeId);
+    const { data: deleted, error } = await supabase
+      .from("products")
+      .delete()
+      .eq("id", deleteTarget.id)
+      .eq("store_id", storeId)
+      .select("id");
     setDeleting(false);
     if (error) return toast.error(mapProductError(error));
+    // RLS reports an unauthorized DELETE as "0 rows", not as an error.
+    if (!deleted || deleted.length === 0) return toast.error(NOTHING_DELETED_MESSAGE);
     toast.success("تم حذف المنتج.");
     setDeleteTarget(null);
     void loadProducts();
@@ -232,10 +239,17 @@ export function ProductsPage() {
     setClearing(true);
     const { data, error } = await supabase.from("products").delete().eq("store_id", storeId).select("id");
     setClearing(false);
-    if (error) return toast.error(error.message);
+    if (error) return toast.error(mapProductError(error));
+    if (total > 0 && (!data || data.length === 0)) return toast.error(NOTHING_DELETED_MESSAGE);
     setClearOpen(false);
     toast.success(`تمت تصفية المنتجات — تمت إزالة ${data?.length ?? 0} منتجًا.`);
     void loadProducts();
+  }
+
+  function openFiche(row: ProductRow) {
+    setEditing(row);
+    setPendingBarcode(undefined);
+    setFormOpen(true);
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -414,7 +428,7 @@ export function ProductsPage() {
                   <th className="w-28 px-3 py-2 text-end font-bold">السعر</th>
                   <th className="w-40 px-3 py-2 text-center font-bold">المخزون</th>
                   {perms.canManageProducts && <th className="w-24 px-3 py-2 text-center font-bold">مفعّل</th>}
-                  {perms.canManageProducts && <th className="w-24 px-3 py-2 text-center font-bold">إجراءات</th>}
+                  <th className="w-24 px-3 py-2 text-center font-bold">إجراءات</th>
                 </tr>
               </thead>
               <tbody>
@@ -430,7 +444,9 @@ export function ProductsPage() {
                           ) : (
                             <div className="size-9 shrink-0 rounded-md bg-[var(--muted)]" />
                           )}
-                          <span className="truncate font-medium">{row.name}</span>
+                          <button type="button" className="truncate text-start font-medium hover:underline" onClick={() => openFiche(row)}>
+                            {row.name}
+                          </button>
                         </div>
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground num" dir="ltr">
@@ -466,31 +482,29 @@ export function ProductsPage() {
                           </button>
                         </td>
                       )}
-                      {perms.canManageProducts && (
-                        <td className="px-3 py-2">
-                          <div className="flex items-center justify-center gap-1.5">
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="size-7"
-                              aria-label="تعديل"
-                              onClick={() => {
-                                setEditing(row);
-                                setPendingBarcode(undefined);
-                                setFormOpen(true);
-                              }}
-                            >
-                              <Pencil className="size-3.5" aria-hidden />
+                      <td className="px-3 py-2">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {/* Without can_manage_products the Fiche opens read-only
+                              (details, barcodes, variants, price history) — SUMA
+                              Web's product detail page is open to every member. */}
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            className="size-7"
+                            aria-label={perms.canManageProducts ? "تعديل" : "عرض"}
+                            title={perms.canManageProducts ? "تعديل" : "عرض"}
+                            onClick={() => openFiche(row)}
+                          >
+                            {perms.canManageProducts ? <Pencil className="size-3.5" aria-hidden /> : <Eye className="size-3.5" aria-hidden />}
+                          </Button>
+                          {/* Deleting is store-admin only (RLS). */}
+                          {perms.isAdmin && (
+                            <Button size="icon" variant="outline" className="size-7" aria-label="حذف" disabled={!isOnline} onClick={() => setDeleteTarget(row)}>
+                              <Trash2 className="size-3.5 text-destructive" aria-hidden />
                             </Button>
-                            {/* Deleting is store-admin only (RLS). */}
-                            {perms.isAdmin && (
-                              <Button size="icon" variant="outline" className="size-7" aria-label="حذف" disabled={!isOnline} onClick={() => setDeleteTarget(row)}>
-                                <Trash2 className="size-3.5 text-destructive" aria-hidden />
-                              </Button>
-                            )}
-                          </div>
-                        </td>
-                      )}
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -612,7 +626,7 @@ function CategoriesDialog({
     setCreating(true);
     const { error } = await supabase.from("categories").insert({ store_id: storeId, name: trimmed });
     setCreating(false);
-    if (error) return toast.error(error.message);
+    if (error) return toast.error(error.message.includes("uq_categories_store_name") ? "عندك تصنيف بنفس الاسم من قبل." : mapProductError(error));
     setName("");
     toast.success("تزاد التصنيف.");
     onChanged();
@@ -621,15 +635,27 @@ function CategoriesDialog({
   async function rename(c: CategoryRow, next: string) {
     const trimmed = next.trim();
     if (!trimmed || trimmed === c.name) return;
-    const { error } = await supabase.from("categories").update({ name: trimmed }).eq("id", c.id).eq("store_id", storeId);
-    if (error) return toast.error(error.message.includes("uq_categories_store_name") ? "عندك تصنيف بنفس الاسم من قبل." : error.message);
+    const { data, error } = await supabase
+      .from("categories")
+      .update({ name: trimmed })
+      .eq("id", c.id)
+      .eq("store_id", storeId)
+      .select("id");
+    if (error) return toast.error(error.message.includes("uq_categories_store_name") ? "عندك تصنيف بنفس الاسم من قبل." : mapProductError(error));
+    if (!data || data.length === 0) return toast.error(NOTHING_CHANGED_MESSAGE);
     toast.success("تم التحديث.");
     onChanged();
   }
 
   async function toggle(c: CategoryRow) {
-    const { error } = await supabase.from("categories").update({ is_active: !c.is_active }).eq("id", c.id).eq("store_id", storeId);
-    if (error) return toast.error(error.message);
+    const { data, error } = await supabase
+      .from("categories")
+      .update({ is_active: !c.is_active })
+      .eq("id", c.id)
+      .eq("store_id", storeId)
+      .select("id");
+    if (error) return toast.error(mapProductError(error));
+    if (!data || data.length === 0) return toast.error(NOTHING_CHANGED_MESSAGE);
     onChanged();
   }
 

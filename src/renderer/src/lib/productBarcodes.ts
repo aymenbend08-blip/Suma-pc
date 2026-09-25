@@ -109,8 +109,17 @@ export function mapProductError(error: { message: string; code?: string | null }
   if (code === "23505") return "هذه القيمة مستعملة من قبل في محلك (باركود أو كود مكرر).";
   if (message.includes("تغيير السعر محجوز")) return "تغيير السعر محجوز لصاحب المحل فقط.";
   if (lower.includes("row-level security") || code === "42501") return "ما عندكش الصلاحية باش تدير هذا التغيير.";
+  // .update(...).select().single() on a row RLS hides from the write (or
+  // that no longer exists) comes back as PGRST116 "0 rows" — not a crash.
+  if (code === "PGRST116") return NOTHING_CHANGED_MESSAGE;
   return message;
 }
+
+/** Shown when a write returned no row: RLS silently filters rows the user
+ * may not change (DELETE/UPDATE affect 0 rows instead of failing), or the
+ * row was already removed elsewhere. Never report that as success. */
+export const NOTHING_CHANGED_MESSAGE = "ما تبدّل والو — ما عندكش الصلاحية على هذا العنصر أو ما بقاش موجود.";
+export const NOTHING_DELETED_MESSAGE = "ما تحذف والو — ما عندكش صلاحية الحذف أو العنصر ما بقاش موجود.";
 
 const ALT_BARCODE_SEARCH_CAP = 200;
 

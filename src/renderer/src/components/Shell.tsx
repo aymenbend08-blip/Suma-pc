@@ -94,7 +94,8 @@ function buildSections(failedCount: number): SidebarSection[] {
       key: "articles",
       label: "المنتجات",
       icon: Package,
-      visible: (p) => p.canManageProducts,
+      // Read-only for members without can_manage_products (SUMA Web parity).
+      visible: () => true,
       page: "products",
     },
     {

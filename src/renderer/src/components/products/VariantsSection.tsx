@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Ban, CheckCircle2, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { findBarcodeConflict, mapProductError, validateBarcode } from "@/lib/productBarcodes";
+import { findBarcodeConflict, mapProductError, NOTHING_DELETED_MESSAGE, validateBarcode } from "@/lib/productBarcodes";
 import { uploadProductImage } from "@/lib/productImages";
 import type { ProductVariantRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
@@ -119,13 +119,17 @@ export function VariantsSection({
   async function confirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
-    const { error } = await supabase
+    // RLS turns an unauthorized DELETE into "0 rows, no error" — ask for the
+    // deleted ids back so that case is reported instead of shown as done.
+    const { data: deleted, error } = await supabase
       .from("product_variants")
       .delete()
       .eq("id", deleteTarget.variant.id)
-      .eq("store_id", storeId);
+      .eq("store_id", storeId)
+      .select("id");
     setDeleting(false);
     if (error) return toast.error(mapProductError(error));
+    if (!deleted || deleted.length === 0) return toast.error(NOTHING_DELETED_MESSAGE);
     onVariantsChange(variants.filter((v) => v.id !== deleteTarget.variant.id));
     setDeleteTarget(null);
     toast.success("تم حذف التنويعة.");
