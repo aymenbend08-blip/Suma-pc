@@ -1,36 +1,27 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, FolderPlus, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, CloudOff, FileDown, FileUp, FolderPlus, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useStore } from "@/context/StoreContext";
+import { useSync } from "@/context/SyncContext";
 import { formatDA } from "@/lib/format";
+import { findProductIdsByAltBarcode, mapProductError, sanitizeSearchTerm } from "@/lib/productBarcodes";
+import { EXPORT_HEADERS, buildExportRow, chunk } from "@/lib/productImport";
 import type { CategoryRow, ProductRow } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ConfirmDialog } from "@/components/products/ConfirmDialog";
+import { ProductImportDialog } from "@/components/products/ProductImportDialog";
 import { ProductFichePage } from "@/pages/ProductFichePage";
 
 const PAGE_SIZE = 20;
 const BARCODE_LIKE = /^[0-9]{6,}$/;
+const EXPORT_PAGE = 1000;
+/** ids per `.in()` batch — keeps the request URL well under proxy limits. */
+const IN_BATCH = 200;
 
 type FilterKind = "all" | "active" | "inactive" | "low_stock" | "out_of_stock" | "expiring_soon";
-
-/** Same Postgres constraint names SUMA Web's mapProductError() translates —
- * a duplicate barcode/internal_code surfaces through PostgREST identically
- * whether the insert/update comes from the web server function or straight
- * from this authenticated client, so the same mapping applies unchanged. */
-function mapProductError(message: string): string {
-  if (message.includes("uq_products_store_barcode") || message.includes("uq_product_barcodes_store_barcode")) {
-    return "هذا الباركود مستعمل من قبل في محلك.";
-  }
-  if (message.includes("uq_products_store_internal")) {
-    return "الكود الداخلي مستعمل من قبل في محلك.";
-  }
-  if (message.toLowerCase().includes("row-level security")) {
-    return "ما عندكش الصلاحية باش تدير هذا التغيير.";
-  }
-  return message;
-}
 
 /**
  * A straight port of SUMA Web's المنتجات screen (products.index.tsx +
@@ -45,10 +36,10 @@ function mapProductError(message: string): string {
  * (insert/update/delete, the barcode/internal-code uniqueness checks,
  * category CRUD) is unchanged.
  *
- * Also intentionally deferred, each its own sizable feature on Web: the
- * camera barcode scanner (a USB/keyboard-wedge scanner typing into the
- * barcode field already works, which is the normal Desktop setup anyway),
- * Excel export/import, and price/stock history.
+ * Also intentionally deferred: the camera barcode scanner (a USB/
+ * keyboard-wedge scanner typing into the barcode field already works,
+ * which is the normal Desktop setup anyway). Excel import/export live here
+ * (ProductImportDialog / exportExcel); price history is on Fiche Produit.
  *
  * Add/edit now opens ProductFichePage — a full-screen "Fiche Produit"
  * view, not the small dialog this started as (see that file). It also
@@ -58,6 +49,7 @@ function mapProductError(message: string): string {
  */
 export function ProductsPage() {
   const { active, perms } = useStore();
+  const { isOnline } = useSync();
   const storeId = active!.id;
 
   const [rows, setRows] = useState<ProductRow[]>([]);
@@ -81,6 +73,8 @@ export function ProductsPage() {
   const [clearing, setClearing] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ProductRow | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -99,17 +93,12 @@ export function ProductsPage() {
   async function loadProducts() {
     setLoading(true);
     const from = page * PAGE_SIZE;
-    const term = debouncedSearch.replace(/[%,]/g, " ").trim();
+    const term = sanitizeSearchTerm(debouncedSearch);
 
-    let aliasIds: string[] | null = null;
-    if (term && /^[A-Za-z0-9\-_]+$/.test(term)) {
-      const { data: aliasRows } = await supabase
-        .from("product_barcodes")
-        .select("product_id")
-        .eq("store_id", storeId)
-        .ilike("barcode", `%${term}%`);
-      aliasIds = (aliasRows ?? []).map((r) => r.product_id);
-    }
+    // Two-step search (SUMA Web's pattern): product ids whose EXTRA or
+    // VARIANT barcode matches, capped, then OR'ed into the one list query
+    // as id.in.(...) — never a query per row.
+    const aliasIds = term ? await findProductIdsByAltBarcode(storeId, term) : [];
 
     let query = supabase
       .from("products")
@@ -119,11 +108,11 @@ export function ProductsPage() {
 
     if (term) {
       const orParts = [`name.ilike.%${term}%`, `barcode.ilike.%${term}%`, `internal_code.ilike.%${term}%`];
-      if (aliasIds && aliasIds.length > 0) orParts.push(`id.in.(${aliasIds.join(",")})`);
+      if (aliasIds.length > 0) orParts.push(`id.in.(${aliasIds.join(",")})`);
       query = query.or(orParts.join(","));
     }
-    if (priceMin) query = query.gte("selling_price", Number(priceMin));
-    if (priceMax) query = query.lte("selling_price", Number(priceMax));
+    if (priceMin.trim() && Number.isFinite(Number(priceMin))) query = query.gte("selling_price", Number(priceMin));
+    if (priceMax.trim() && Number.isFinite(Number(priceMax))) query = query.lte("selling_price", Number(priceMax));
     if (categoryId) query = query.eq("category_id", categoryId);
     if (filter === "active") query = query.eq("is_active", true);
     if (filter === "inactive") query = query.eq("is_active", false);
@@ -161,14 +150,71 @@ export function ProductsPage() {
   }
 
   async function toggleActive(row: ProductRow) {
-    const { error } = await supabase
+    if (!isOnline) return toast.error("تعديل المنتج يحتاج اتصالاً بالإنترنت.");
+    const { data, error } = await supabase
       .from("products")
       .update({ is_active: !row.is_active })
       .eq("id", row.id)
-      .eq("store_id", storeId);
-    if (error) return toast.error(mapProductError(error.message));
+      .eq("store_id", storeId)
+      .select()
+      .single();
+    if (error) return toast.error(mapProductError(error));
     toast.success("تم تحديث حالة المنتج.");
-    void loadProducts();
+    // Patch the one row in place — unless the active/inactive filter means
+    // it no longer belongs on this page.
+    if (filter === "active" || filter === "inactive") void loadProducts();
+    else setRows((prev) => prev.map((r) => (r.id === row.id ? (data as ProductRow) : r)));
+  }
+
+  /** SUMA Web's export columns (so the file re-imports cleanly) + unit.
+   * Products in 1000-row pages; extra barcodes batch-loaded per page with
+   * `.in()` — no request per product. */
+  async function exportExcel() {
+    if (!isOnline) return toast.error("التصدير يحتاج اتصالاً بالإنترنت.");
+    setExporting(true);
+    try {
+      const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
+      const out: ReturnType<typeof buildExportRow>[] = [];
+      for (let from = 0; ; from += EXPORT_PAGE) {
+        const { data, error } = await supabase
+          .from("products")
+          .select("id, name, internal_code, category_id, purchase_price, selling_price, stock_quantity, barcode, unit")
+          .eq("store_id", storeId)
+          .order("created_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, from + EXPORT_PAGE - 1);
+        if (error) throw new Error(error.message);
+        const pageRows = data ?? [];
+        const extras = new Map<string, string[]>();
+        for (const ids of chunk(pageRows.map((p) => p.id), IN_BATCH)) {
+          for (let bFrom = 0; ; bFrom += EXPORT_PAGE) {
+            const { data: barcodes, error: bError } = await supabase
+              .from("product_barcodes")
+              .select("product_id, barcode")
+              .eq("store_id", storeId)
+              .in("product_id", ids)
+              .order("created_at", { ascending: true })
+              .order("id", { ascending: true })
+              .range(bFrom, bFrom + EXPORT_PAGE - 1);
+            if (bError) throw new Error(bError.message);
+            for (const b of barcodes ?? []) extras.set(b.product_id, [...(extras.get(b.product_id) ?? []), b.barcode]);
+            if (!barcodes || barcodes.length < EXPORT_PAGE) break;
+          }
+        }
+        for (const p of pageRows) out.push(buildExportRow(p, categoryNames, extras));
+        if (pageRows.length < EXPORT_PAGE) break;
+      }
+      const XLSX = await import("xlsx");
+      const ws = XLSX.utils.json_to_sheet(out, { header: [...EXPORT_HEADERS] });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "منتجات");
+      XLSX.writeFile(wb, `SUMA-products-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      toast.success(`تم تصدير ${out.length} منتج.`);
+    } catch (error) {
+      toast.error(`تعذّر التصدير: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function confirmDelete() {
@@ -176,7 +222,7 @@ export function ProductsPage() {
     setDeleting(true);
     const { error } = await supabase.from("products").delete().eq("id", deleteTarget.id).eq("store_id", storeId);
     setDeleting(false);
-    if (error) return toast.error(mapProductError(error.message));
+    if (error) return toast.error(mapProductError(error));
     toast.success("تم حذف المنتج.");
     setDeleteTarget(null);
     void loadProducts();
@@ -201,23 +247,57 @@ export function ProductsPage() {
           <h1 className="text-lg font-bold">المنتجات</h1>
           <p className="text-xs text-muted-foreground num">{total} منتج</p>
         </div>
-        {perms.canManageProducts && (
-          <Button
-            onClick={() => {
-              setEditing(null);
-              setPendingBarcode(undefined);
-              setFormOpen(true);
-            }}
-          >
-            <Plus className="size-4" aria-hidden />
-            منتج جديد
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {perms.canManageProducts && (
+            <>
+              <Button
+                variant="outline"
+                disabled={!isOnline}
+                title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined}
+                onClick={() => setImportOpen(true)}
+              >
+                <FileUp className="size-4" aria-hidden />
+                استيراد Excel
+              </Button>
+              <Button
+                variant="outline"
+                disabled={exporting || !isOnline}
+                title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined}
+                onClick={() => void exportExcel()}
+              >
+                {exporting ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <FileDown className="size-4" aria-hidden />}
+                {exporting ? "جاري التصدير..." : "تصدير Excel"}
+              </Button>
+            </>
+          )}
+          {/* Creating a product is store-admin only (RLS products_admin_insert). */}
+          {perms.isAdmin && (
+            <Button
+              disabled={!isOnline}
+              title={!isOnline ? "يحتاج اتصالاً بالإنترنت" : undefined}
+              onClick={() => {
+                setEditing(null);
+                setPendingBarcode(undefined);
+                setFormOpen(true);
+              }}
+            >
+              <Plus className="size-4" aria-hidden />
+              منتج جديد
+            </Button>
+          )}
+        </div>
       </div>
+
+      {!isOnline && (
+        <div className="surface flex items-center gap-2 border-[var(--warning)]/40 bg-[var(--warning)]/10 p-3 text-xs">
+          <CloudOff className="size-4 shrink-0 text-[var(--warning-foreground)]" aria-hidden />
+          <p>غير متصل — إضافة المنتجات وتعديلها والاستيراد والتصدير تحتاج اتصالاً بالإنترنت.</p>
+        </div>
+      )}
 
       <div className="surface flex flex-wrap items-end gap-3 p-4">
         <div className="min-w-48 flex-1">
-          <Label htmlFor="q">البحث بالاسم / الباركود / الكود الداخلي</Label>
+          <Label htmlFor="q">البحث بالاسم / الباركود (أساسي، إضافي، تنويعة) / الكود الداخلي</Label>
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 end-3 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
             <Input id="q" value={search} onChange={(e) => setSearch(e.target.value)} className="pe-9" placeholder="حليب، 1234567890123، S123456" />
@@ -266,10 +346,10 @@ export function ProductsPage() {
           >
             <option value="all">الكل</option>
             <option value="active">مفعّل</option>
-            <option value="inactive">معطّل</option>
+            <option value="inactive">غير مفعّل</option>
             <option value="low_stock">مخزون ناقص</option>
-            <option value="out_of_stock">كمل</option>
-            <option value="expiring_soon">قريب من انتهاء الصلاحية</option>
+            <option value="out_of_stock">نفد</option>
+            <option value="expiring_soon">قرب انتهاء الصلاحية</option>
           </select>
         </div>
         <div>
@@ -304,7 +384,7 @@ export function ProductsPage() {
       ) : rows.length === 0 ? (
         <div className="surface space-y-2 py-8 text-center text-sm text-muted-foreground">
           <p>ما كانش منتجات</p>
-          {BARCODE_LIKE.test(debouncedSearch) && perms.canManageProducts && (
+          {BARCODE_LIKE.test(debouncedSearch) && perms.isAdmin && isOnline && (
             <Button
               variant="outline"
               size="sm"
@@ -375,6 +455,7 @@ export function ProductsPage() {
                         <td className="px-3 py-2 text-center">
                           <button
                             type="button"
+                            disabled={!isOnline}
                             onClick={() => void toggleActive(row)}
                             className={`h-6 w-11 rounded-full transition-colors ${row.is_active ? "bg-[var(--primary)]" : "bg-[var(--muted)]"}`}
                             aria-label="تفعيل / تعطيل"
@@ -401,9 +482,12 @@ export function ProductsPage() {
                             >
                               <Pencil className="size-3.5" aria-hidden />
                             </Button>
-                            <Button size="icon" variant="outline" className="size-7" aria-label="حذف" onClick={() => setDeleteTarget(row)}>
-                              <Trash2 className="size-3.5 text-destructive" aria-hidden />
-                            </Button>
+                            {/* Deleting is store-admin only (RLS). */}
+                            {perms.isAdmin && (
+                              <Button size="icon" variant="outline" className="size-7" aria-label="حذف" disabled={!isOnline} onClick={() => setDeleteTarget(row)}>
+                                <Trash2 className="size-3.5 text-destructive" aria-hidden />
+                              </Button>
+                            )}
                           </div>
                         </td>
                       )}
@@ -457,11 +541,26 @@ export function ProductsPage() {
             setEditing(null);
             setPendingBarcode(undefined);
           }}
-          onSaved={() => {
+          onSaved={(saved) => {
+            const wasEdit = Boolean(editing);
             setFormOpen(false);
             setEditing(null);
             setPendingBarcode(undefined);
+            // An edit patches its row in place; a new product needs the
+            // list query (ordering, filters, count) to place it.
+            if (wasEdit) setRows((prev) => prev.map((r) => (r.id === saved.id ? saved : r)));
+            else void loadProducts();
+          }}
+        />
+      )}
+
+      {importOpen && (
+        <ProductImportDialog
+          storeId={storeId}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
             void loadProducts();
+            void loadCategories();
           }}
         />
       )}
@@ -489,40 +588,6 @@ export function ProductsPage() {
           onConfirm={() => void confirmClearAll()}
         />
       )}
-    </div>
-  );
-}
-
-function ConfirmDialog({
-  title,
-  description,
-  confirmLabel,
-  pending,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  description: string;
-  confirmLabel: string;
-  pending: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onCancel}>
-      <div className="surface w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
-        <h2 className="mb-1 font-bold">{title}</h2>
-        <p className="mb-3 text-sm text-muted-foreground">{description}</p>
-        <div className="flex gap-2">
-          <Button variant="outline" className="flex-1" onClick={onCancel}>
-            إلغاء
-          </Button>
-          <Button variant="destructive" className="flex-1" disabled={pending} onClick={onConfirm}>
-            {pending && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            {confirmLabel}
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }
