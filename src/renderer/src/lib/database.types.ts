@@ -290,6 +290,109 @@ export type PurchaseOrderItemRow = {
   received_quantity: number;
 };
 
+export type PriceHistoryRow = {
+  id: string;
+  product_id: string;
+  store_id: string;
+  old_price: number | null;
+  new_price: number;
+  changed_by: string | null;
+  source: string;
+  created_at: string;
+};
+
+export type PointsLedgerReason =
+  | "opening"
+  | "sale"
+  | "refund"
+  | "sale_edit"
+  | "manual_adjust"
+  | "redeem"
+  | "system";
+
+export type CustomerPointsLedgerRow = {
+  id: string;
+  store_id: string;
+  customer_id: string;
+  delta: number;
+  balance_after: number;
+  reason: PointsLedgerReason;
+  reference_type: string | null;
+  reference_id: string | null;
+  notes: string | null;
+  client_request_id: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+export type StatementKind = "credit_sale" | "cash_sale" | "card_sale" | "refund" | "payment";
+
+export type StatementLine = {
+  kind: StatementKind;
+  occurred_at: string;
+  /** sale id for sale/refund lines, customer_payments id for payments */
+  reference_id: string;
+  payment_method: "cash" | "card" | "credit" | null;
+  amount: number;
+  debit: number;
+  credit: number;
+  /** Running credit balance over the customer's whole history — correct on
+   * any page and under any filter. */
+  balance_after: number;
+};
+
+export type CustomerStatement = {
+  customer: CustomerRow;
+  opening_balance: number;
+  closing_balance: number;
+  period_debit: number;
+  period_credit: number;
+  computed_balance: number;
+  recorded_balance: number;
+  total_count: number;
+  rows: StatementLine[];
+};
+
+export type ImportDuplicateStrategy = "update" | "skip" | "barcode_only";
+
+export type ImportProductRow = {
+  /** Source spreadsheet line number, echoed back in results/warnings. */
+  row: number;
+  name: string;
+  barcode?: string | null;
+  extra_barcodes?: string[];
+  internal_code?: string | null;
+  selling_price?: number | null;
+  purchase_price?: number | null;
+  stock_quantity?: number | null;
+  unit?: string | null;
+  category_name?: string | null;
+  low_stock_threshold?: number | null;
+  points_reward?: number | null;
+  expiry_date?: string | null;
+  description?: string | null;
+};
+
+export type ImportRowStatus = "created" | "updated" | "skipped" | "barcode_only" | "error";
+
+export type ImportProductsResult = {
+  dry_run: boolean;
+  created: number;
+  updated: number;
+  skipped: number;
+  barcode_only: number;
+  failed: number;
+  results: Array<{
+    row: number;
+    name: string | null;
+    status: ImportRowStatus;
+    product_id?: string | null;
+    matched_by?: "barcode" | "extra_barcode" | "variant_barcode" | "internal_code" | "name" | null;
+    reason?: string;
+  }>;
+  warnings: Array<{ row: number; note: string }>;
+};
+
 type TableDef<Row> = {
   Row: Row;
   Insert: Partial<Row>;
@@ -318,6 +421,8 @@ export type Database = {
       suppliers: TableDef<SupplierRow>;
       purchase_orders: TableDef<PurchaseOrderRow>;
       purchase_order_items: TableDef<PurchaseOrderItemRow>;
+      price_history: TableDef<PriceHistoryRow>;
+      customer_points_ledger: TableDef<CustomerPointsLedgerRow>;
     };
     Views: Record<string, never>;
     Functions: {
@@ -406,6 +511,51 @@ export type Database = {
       decide_employee_link_request: {
         Args: { _store_member_id: string; _approve: boolean };
         Returns: StoreMemberRow;
+      };
+      decide_customer_request: {
+        Args: { _customer_id: string; _store_id: string; _approve: boolean };
+        Returns: CustomerRow;
+      };
+      create_customer: {
+        Args: { _store_id: string; _full_name: string; _phone: string };
+        Returns: CustomerRow;
+      };
+      update_customer: {
+        Args: { _customer_id: string; _store_id: string; _full_name: string; _phone: string };
+        Returns: CustomerRow;
+      };
+      adjust_customer_points: {
+        Args: {
+          _customer_id: string;
+          _store_id: string;
+          _delta: number;
+          _reason?: "manual_adjust" | "redeem";
+          _notes?: string;
+          _client_request_id?: string;
+        };
+        Returns: CustomerRow;
+      };
+      get_customer_statement: {
+        Args: {
+          _customer_id: string;
+          _store_id: string;
+          _from?: string;
+          _to?: string;
+          _kinds?: StatementKind[];
+          _search?: string;
+          _limit?: number;
+          _offset?: number;
+        };
+        Returns: CustomerStatement;
+      };
+      import_products: {
+        Args: {
+          _store_id: string;
+          _rows: ImportProductRow[];
+          _duplicate_strategy?: ImportDuplicateStrategy;
+          _dry_run?: boolean;
+        };
+        Returns: ImportProductsResult;
       };
     };
     Enums: Record<string, never>;

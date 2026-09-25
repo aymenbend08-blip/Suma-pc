@@ -1,7 +1,12 @@
 import { supabase } from "./supabase";
 import type {
   CustomerRow,
+  CustomerStatement,
+  ImportDuplicateStrategy,
+  ImportProductRow,
+  ImportProductsResult,
   ProductRow,
+  StatementKind,
   PurchaseOrderRow,
   RegisterSessionRow,
   SaleRow,
@@ -48,6 +53,9 @@ export type RefundSaleArgs = {
   _sale_id: string;
   _store_id: string;
   _items: Array<{ sale_item_id: string; quantity: number }>;
+  /** One id per refund attempt, reused on retry — refund_sale() returns the
+   * already-applied result instead of refunding twice. */
+  _client_request_id?: string;
 };
 
 export async function refundSale(args: RefundSaleArgs) {
@@ -228,6 +236,83 @@ export type DecideEmployeeLinkRequestArgs = { _store_member_id: string; _approve
 export async function decideEmployeeLinkRequest(args: DecideEmployeeLinkRequestArgs) {
   return supabase.rpc("decide_employee_link_request" as never, args as never) as unknown as Promise<{
     data: StoreMemberRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+// ---- Phase B: customers, loyalty, statement, import ---------------------
+
+export async function decideCustomerRequest(args: { _customer_id: string; _store_id: string; _approve: boolean }) {
+  return supabase.rpc("decide_customer_request" as never, args as never) as unknown as Promise<{
+    data: CustomerRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/** Staff-side customer creation: only ever writes name/phone (+ approved
+ * status) — never the credit/points balances. Admin or can_manage_customers. */
+export async function createCustomer(args: { _store_id: string; _full_name: string; _phone: string }) {
+  return supabase.rpc("create_customer" as never, args as never) as unknown as Promise<{
+    data: CustomerRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export async function updateCustomer(args: {
+  _customer_id: string;
+  _store_id: string;
+  _full_name: string;
+  _phone: string;
+}) {
+  return supabase.rpc("update_customer" as never, args as never) as unknown as Promise<{
+    data: CustomerRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/** 'manual_adjust' (±, store admins only) or 'redeem' (negative only, admins
+ * or can_manage_customers). Idempotent on _client_request_id; the ledger row
+ * is written by a trigger, so history can never miss a change. */
+export async function adjustCustomerPoints(args: {
+  _customer_id: string;
+  _store_id: string;
+  _delta: number;
+  _reason: "manual_adjust" | "redeem";
+  _notes?: string;
+  _client_request_id?: string;
+}) {
+  return supabase.rpc("adjust_customer_points" as never, args as never) as unknown as Promise<{
+    data: CustomerRow | null;
+    error: { message: string } | null;
+  }>;
+}
+
+export async function getCustomerStatement(args: {
+  _customer_id: string;
+  _store_id: string;
+  _from?: string;
+  _to?: string;
+  _kinds?: StatementKind[];
+  _search?: string;
+  _limit?: number;
+  _offset?: number;
+}) {
+  return supabase.rpc("get_customer_statement" as never, args as never) as unknown as Promise<{
+    data: CustomerStatement | null;
+    error: { message: string } | null;
+  }>;
+}
+
+/** One call per chunk (≤ 1000 rows, one transaction, per-row error capture).
+ * _dry_run: validate + classify every row without writing — the preview. */
+export async function importProducts(args: {
+  _store_id: string;
+  _rows: ImportProductRow[];
+  _duplicate_strategy?: ImportDuplicateStrategy;
+  _dry_run?: boolean;
+}) {
+  return supabase.rpc("import_products" as never, args as never) as unknown as Promise<{
+    data: ImportProductsResult | null;
     error: { message: string } | null;
   }>;
 }
