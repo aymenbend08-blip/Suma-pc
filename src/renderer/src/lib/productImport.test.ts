@@ -253,10 +253,66 @@ describe("prepareRows", () => {
     expect(rows[2].errors[0]).toContain("باركود مكرر داخل الملف");
   });
 
-  it("notes (without blocking) same-name rows that have no barcode or code", () => {
-    const { rows } = prepareRows([row({ name: "Sucre" }), row({ name: "sucre" })], mapping, extras);
-    expect(rows[0].errors).toEqual([]);
-    expect(rows[0].notes[0]).toContain("نفس الاسم");
+  it("merges same-name lines into ONE product, their barcodes becoming extra barcodes (SUMA Web grouping)", () => {
+    const { rows } = prepareRows(
+      [
+        row({ name: "Coca 1L", barcode: "111", selling_price: "150", stock_quantity: "10" }),
+        row({ name: "Other", barcode: "999" }),
+        row({ name: "coca 1l", barcode: "222", stock_quantity: "10", category_name: "Boissons" }),
+        row({ name: "COCA 1L", barcode: "111", extra_barcodes: "333", selling_price: "150", stock_quantity: "10" }),
+      ],
+      mapping,
+      extras,
+    );
+    expect(rows.map((r) => r.payload.name)).toEqual(["Coca 1L", "Other"]);
+    const coca = rows[0];
+    expect(coca.errors).toEqual([]); // the repeated 111 is the same product, not an in-file duplicate
+    expect(coca.payload.barcode).toBe("111");
+    expect(coca.payload.extra_barcodes).toEqual(["222", "333"]);
+    expect(coca.payload.selling_price).toBe(150);
+    expect(coca.payload.stock_quantity).toBe(10); // never summed
+    expect(coca.payload.category_name).toBe("Boissons"); // blank filled from a later line
+    expect(coca.mergedLines).toEqual([4, 5]);
+    expect(coca.notes[0]).toContain("دُمجت معه الأسطر 4، 5");
+  });
+
+  it("keeps same-name lines that disagree on price or stock separate and flags both", () => {
+    const { rows } = prepareRows(
+      [row({ name: "Sucre", selling_price: "100" }), row({ name: "sucre", selling_price: "120" }), row({ name: "SUCRE", stock_quantity: "7" })],
+      mapping,
+      extras,
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.errors.length === 0)).toBe(true);
+    expect(rows[0].notes.some((n) => n.includes("ما تدمجوش"))).toBe(true);
+    expect(rows[1].notes.some((n) => n.includes("ما تدمجوش"))).toBe(true);
+    expect(rows[2].notes.some((n) => n.includes("ما تدمجوش"))).toBe(true);
+    // No barcode and no code: the server matches them by name, so the
+    // "same product" note from the in-file check is still there too.
+    expect(rows[0].notes.some((n) => n.includes("سيُعتبر نفس المنتج"))).toBe(true);
+  });
+
+  it("never merges lines with different internal codes or with a client error", () => {
+    const { rows } = prepareRows(
+      [
+        row({ name: "Riz", internal_code: "R1", barcode: "501" }),
+        row({ name: "riz", internal_code: "R2", barcode: "502" }),
+        row({ name: "riz", barcode: "bad code é" }),
+      ],
+      mapping,
+      extras,
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0].payload.extra_barcodes).toBeUndefined();
+    expect(rows[1].payload.barcode).toBe("502");
+    expect(rows[2].errors[0]).toContain("باركود غير صالح");
+  });
+
+  it("merges blank-stock lines (blank counts as 0, SUMA Web rule) and promotes a barcode when the leader had none", () => {
+    const { rows } = prepareRows([row({ name: "Pain" }), row({ name: "pain", barcode: "777" })], mapping, extras);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload.barcode).toBe("777");
+    expect(rows[0].payload.extra_barcodes).toBeUndefined();
   });
 
   it("uses SheetJS's __rowNum__ for the line number when present", () => {

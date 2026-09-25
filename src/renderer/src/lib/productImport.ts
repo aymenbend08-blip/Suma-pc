@@ -294,6 +294,9 @@ export type PreparedRow = {
   errors: string[];
   /** Non-blocking notes (e.g. an invalid extra barcode that was dropped). */
   notes: string[];
+  /** Other spreadsheet lines folded into this product (same name) — see
+   * mergeSameNameRows. Their barcodes became this row's extra barcodes. */
+  mergedLines?: number[];
 };
 
 export type PrepareResult = {
@@ -422,8 +425,100 @@ export function prepareRows(
     rows.push({ line, payload, errors, notes });
   });
 
-  flagInFileDuplicates(rows);
-  return { rows, skippedEmpty, skippedTotals };
+  const merged = mergeSameNameRows(rows);
+  flagInFileDuplicates(merged);
+  return { rows: merged, skippedEmpty, skippedTotals };
+}
+
+/**
+ * SUMA Web's "Universal Import" grouping (products.import.tsx
+ * buildProductGroups): many POS exports list one product on several lines,
+ * one line per barcode. Lines with the SAME name (case-insensitive) that do
+ * not disagree on purchase price, selling price or stock are ONE product:
+ * the first line leads, every other line's barcodes become its extra
+ * barcodes, and fields the leader left blank are filled from the others.
+ * Lines that do disagree are kept separate and flagged for review — merging
+ * them would be a guess. Stock is compared the way SUMA Web does (blank
+ * counts as 0) and is never summed.
+ *
+ * PC-only rule on top: two lines with different non-empty internal codes
+ * are also kept separate (internal codes are unique per store, so a merge
+ * would silently drop one). Lines with a client-side error never merge.
+ */
+export function mergeSameNameRows(rows: PreparedRow[]): PreparedRow[] {
+  const out: PreparedRow[] = [];
+  const leaders = new Map<string, PreparedRow>();
+  const flagged = new Set<PreparedRow>();
+
+  for (const row of rows) {
+    if (row.errors.length > 0) {
+      out.push(row);
+      continue;
+    }
+    const key = row.payload.name.toLowerCase();
+    const leader = leaders.get(key);
+    if (!leader) {
+      leaders.set(key, row);
+      out.push(row);
+      continue;
+    }
+
+    const a = leader.payload;
+    const b = row.payload;
+    const differs = (x: number | null | undefined, y: number | null | undefined) =>
+      x !== undefined && x !== null && y !== undefined && y !== null && x !== y;
+    const conflicting =
+      differs(a.purchase_price, b.purchase_price) ||
+      differs(a.selling_price, b.selling_price) ||
+      (a.stock_quantity ?? 0) !== (b.stock_quantity ?? 0) ||
+      (Boolean(a.internal_code) && Boolean(b.internal_code) && a.internal_code !== b.internal_code);
+
+    if (conflicting) {
+      const note = `نفس الاسم في السطرين ${leader.line} و${row.line} لكن بسعر/مخزون/كود مختلف — ما تدمجوش، راجعهم.`;
+      if (!flagged.has(leader)) {
+        leader.notes.push(note);
+        flagged.add(leader);
+      }
+      row.notes.push(note);
+      out.push(row);
+      continue;
+    }
+
+    const codes = [b.barcode, ...(b.extra_barcodes ?? [])].filter((c): c is string => Boolean(c));
+    const extras = [...(a.extra_barcodes ?? [])];
+    for (const code of codes) {
+      if (code === a.barcode || extras.includes(code)) continue;
+      extras.push(code);
+    }
+    if (!a.barcode && extras.length > 0) a.barcode = extras.shift();
+    if (extras.length > 0) a.extra_barcodes = extras;
+    if (extras.length > LIMITS.extraBarcodes && !leader.errors.some((e) => e.includes("باركود إضافي في صف"))) {
+      leader.errors.push(`أكثر من ${LIMITS.extraBarcodes} باركود إضافي في صف واحد.`);
+    }
+    const fill = <K extends keyof ImportProductRow>(k: K) => {
+      if ((a[k] === undefined || a[k] === null) && b[k] !== undefined && b[k] !== null) a[k] = b[k];
+    };
+    fill("purchase_price");
+    fill("selling_price");
+    fill("stock_quantity");
+    fill("internal_code");
+    fill("unit");
+    fill("category_name");
+    fill("description");
+    fill("expiry_date");
+    fill("low_stock_threshold");
+    fill("points_reward");
+
+    leader.mergedLines = [...(leader.mergedLines ?? []), row.line];
+    leader.notes.push(...row.notes);
+  }
+
+  for (const leader of leaders.values()) {
+    if (leader.mergedLines && leader.mergedLines.length > 0) {
+      leader.notes.unshift(`دُمجت معه الأسطر ${leader.mergedLines.join("، ")} (نفس الاسم) — باركوداتها أُضيفت كباركودات إضافية.`);
+    }
+  }
+  return out;
 }
 
 /** A main barcode used by more than one row is an error on EVERY one of
@@ -551,6 +646,7 @@ export const DUPLICATE_STRATEGY_LABEL: Record<ImportDuplicateStrategy, string> =
   update: "تحديث المنتج الموجود",
   skip: "تجاهل",
   barcode_only: "إضافة الباركودات فقط",
+  create_new: "إنشاء منتج جديد (بلا الباركود المكرر)",
 };
 
 // ---- CSV report, template, export ---------------------------------------

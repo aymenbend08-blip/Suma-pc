@@ -337,6 +337,10 @@ export function ProductImportDialog({
   const pageCount = Math.max(1, Math.ceil(filtered.length / PREVIEW_PAGE));
   const pageRows = filtered.slice(page * PREVIEW_PAGE, (page + 1) * PREVIEW_PAGE);
   const importableCount = preview.filter((r) => r.importable).length;
+  const mergedLineCount = useMemo(
+    () => (prepared?.rows ?? []).reduce((n, r) => n + (r.mergedLines?.length ?? 0), 0),
+    [prepared],
+  );
   const stepIndex = STEPS.findIndex((s) => s.key === step);
   const busy = reading || previewing || step === "importing";
 
@@ -508,6 +512,11 @@ export function ProductImportDialog({
               )}
               {(prepared?.skippedEmpty ?? 0) > 0 && (
                 <p className="text-xs text-muted-foreground">تم تجاهل {prepared?.skippedEmpty} سطر بدون اسم منتج.</p>
+              )}
+              {mergedLineCount > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {mergedLineCount} سطر بنفس اسم منتج آخر دُمج معه كمنتج واحد (باركوداته صارت باركودات إضافية) — كما في SUMA Web.
+                </p>
               )}
               <StrategyPicker
                 value={strategy}
@@ -714,6 +723,8 @@ function StrategyPicker({
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground">
         التحديث يبدّل فقط الحقول الموجودة في الملف؛ تغيير سعر البيع محجوز لصاحب المحل؛ تغيير الكمية يُسجَّل كحركة مخزون.
+        {value === "create_new" &&
+          " «إنشاء منتج جديد» يضيف كل صف مكرر كمنتج جديد بدون الباركود (أو الكود الداخلي) المحجوز لمنتج آخر — راجعهم بعد الاستيراد (محجوز لصاحب المحل والمدير)."}
       </p>
     </div>
   );

@@ -353,7 +353,7 @@ export type CustomerStatement = {
   rows: StatementLine[];
 };
 
-export type ImportDuplicateStrategy = "update" | "skip" | "barcode_only";
+export type ImportDuplicateStrategy = "update" | "skip" | "barcode_only" | "create_new";
 
 export type ImportProductRow = {
   /** Source spreadsheet line number, echoed back in results/warnings. */
