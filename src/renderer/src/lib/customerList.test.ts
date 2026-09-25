@@ -4,6 +4,7 @@ import {
   customerCreditState,
   customerInitials,
   filterCustomersLocal,
+  friendlyCustomerError,
   isCustomerOverdue,
   matchesCustomerSearch,
   overdueCutoffIso,
@@ -71,6 +72,7 @@ describe("search", () => {
   it("strips PostgREST-breaking characters and wildcards", () => {
     expect(sanitizeCustomerSearch("  ahmed%,(x)*  ")).toBe("ahmed x");
     expect(sanitizeCustomerSearch("a\\b")).toBe("a b");
+    expect(sanitizeCustomerSearch('say "hi"')).toBe("say hi");
     expect(sanitizeCustomerSearch("%%%")).toBe("");
     expect(sanitizeCustomerSearch("x".repeat(100))).toHaveLength(60);
   });
@@ -164,5 +166,13 @@ describe("customerInitials", () => {
     expect(customerInitials("karim benali")).toBe("KB");
     expect(customerInitials("سمير")).toBe("س");
     expect(customerInitials("   ")).toBe("؟");
+  });
+});
+
+describe("friendlyCustomerError", () => {
+  it("keeps server messages and replaces transport failures", () => {
+    expect(friendlyCustomerError("رقم الهاتف مستعمل من قبل.")).toBe("رقم الهاتف مستعمل من قبل.");
+    expect(friendlyCustomerError("TypeError: Failed to fetch")).toContain("تعذر الاتصال");
+    expect(friendlyCustomerError(null)).toBe("حدث خطأ غير متوقع.");
   });
 });

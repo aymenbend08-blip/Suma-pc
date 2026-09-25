@@ -5,6 +5,8 @@
  * form validation. No React, no Supabase — unit-tested in isolation.
  */
 
+import { isNetworkError } from "./net";
+
 export type CustomerFilter = "all" | "debt" | "credit" | "overdue";
 
 export const CUSTOMER_FILTERS: ReadonlyArray<{ key: CustomerFilter; label: string }> = [
@@ -57,11 +59,11 @@ export function customerCreditState(balance: number | string | null | undefined)
 }
 
 /** Makes a free-text term safe to embed in a PostgREST `or(...)` filter:
- * drops the LIKE wildcard `%`, the filter separators `,` `(` `)`, `*` and
- * backslashes, collapses whitespace, and caps the length. */
+ * drops the LIKE wildcard `%`, the filter separators `,` `(` `)`, `*`,
+ * double quotes and backslashes, collapses whitespace, and caps the length. */
 export function sanitizeCustomerSearch(raw: string): string {
   return raw
-    .replace(/[%,()*\\]/g, " ")
+    .replace(/[%,()*\\"]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 60);
@@ -152,4 +154,12 @@ export function validateCustomerInput(fullName: string, phone: string): Customer
 export function customerInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "؟";
+}
+
+/** Server (RPC) messages are already Arabic and shown as-is; only raw
+ * transport failures get a readable Arabic replacement. */
+export function friendlyCustomerError(message: string | null | undefined): string {
+  if (!message) return "حدث خطأ غير متوقع.";
+  if (isNetworkError(message)) return "تعذر الاتصال بالخادم — تحقق من الإنترنت وأعد المحاولة.";
+  return message;
 }
