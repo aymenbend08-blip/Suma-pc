@@ -38,6 +38,10 @@ DECLARE
   _def text := pg_get_functiondef('public.import_products(uuid,jsonb,text,boolean)'::regprocedure);
   _patched text;
 BEGIN
+  -- Replaying this migration on a database that already has the patch is a no-op.
+  IF position('THEN name ELSE _name END' in _def) > 0 THEN
+    RETURN;
+  END IF;
   _patched := replace(_def, 'name = _name,', 'name = CASE WHEN _matched_by = ''name'' THEN name ELSE _name END,');
   IF _patched = _def THEN
     RAISE EXCEPTION 'import_products patch target not found';
